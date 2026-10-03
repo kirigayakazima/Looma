@@ -1,0 +1,18 @@
+[package]
+name = "looma-database"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Looma Database - SQLite storage, migrations and repository layer"
+
+[dependencies]
+looma-core.workspace = true
+rusqlite.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true

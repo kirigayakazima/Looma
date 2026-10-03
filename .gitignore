@@ -1,0 +1,35 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Node / Frontend
+node_modules
+.pnpm-store
+dist
+dist-ssr
+*.local
+
+# Tauri build artifacts
+src-tauri/target
+apps/desktop/src-tauri/target
+
+# Databases & local user data
+*.db
+*.db-shm
+*.db-wal
+.looma/
+vault.db
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea
+*.log

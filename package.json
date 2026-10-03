@@ -1,0 +1,18 @@
+{
+  "name": "looma-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @looma/desktop dev",
+    "build": "pnpm --filter @looma/desktop build",
+    "tauri": "pnpm --filter @looma/desktop tauri",
+    "tauri:dev": "pnpm --filter @looma/desktop tauri dev",
+    "tauri:build": "pnpm --filter @looma/desktop tauri build",
+    "cargo:check": "cargo check --workspace",
+    "cargo:test": "cargo test --workspace"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

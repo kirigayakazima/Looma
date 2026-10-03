@@ -1,0 +1,181 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { Sidebar, NavTab } from './components/Sidebar';
+import { Header } from './components/Header';
+import { HomeView } from './components/HomeView';
+import { AssetsView } from './components/AssetsView';
+import { EntitiesView } from './components/EntitiesView';
+import { MemoriesView } from './components/MemoriesView';
+import { CollectionsView } from './components/CollectionsView';
+import { SettingsView } from './components/SettingsView';
+import { VaultInfo, VaultStats, Asset, Entity, Memory, Collection } from './types';
+import { useI18n } from './i18n';
+
+export const App: React.FC = () => {
+  const { t } = useI18n();
+  const [currentTab, setCurrentTab] = useState<NavTab>('home');
+  const [vaultInfo, setVaultInfo] = useState<VaultInfo | null>(null);
+  const [vaultStats, setVaultStats] = useState<VaultStats | null>(null);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [entities, setEntities] = useState<Entity[]>([]);
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [collections, setCollections] = useState<Collection[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Safe invoke wrapper with mock fallback for web development preview
+  const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
+    try {
+      return await invoke<T>(cmd, args);
+    } catch (err) {
+      console.warn(`[Tauri IPC] '${cmd}' failed or running in web preview:`, err);
+      return null;
+    }
+  };
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const info = await safeInvoke<VaultInfo>('get_vault_info');
+      if (info) {
+        setVaultInfo(info);
+      } else {
+        // Fallback mock info if accessed outside Tauri webview
+        setVaultInfo({
+          name: t.home.defaultVaultName,
+          version: '0.2.0',
+          vault_path: 'D:/CodePackage/Persoanl/LoomaProject/vault',
+          database_path: 'D:/CodePackage/Persoanl/LoomaProject/vault/.looma/vault.db',
+          is_initialized: true,
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      const stats = await safeInvoke<VaultStats>('get_vault_stats');
+      if (stats) setVaultStats(stats);
+
+      const assetList = await safeInvoke<Asset[]>('list_assets', { limit: 50, offset: 0 });
+      if (assetList) setAssets(assetList);
+
+      const entityList = await safeInvoke<Entity[]>('list_entities', {});
+      if (entityList) setEntities(entityList);
+
+      const memoryList = await safeInvoke<Memory[]>('list_memories', { limit: 50, offset: 0 });
+      if (memoryList) setMemories(memoryList);
+
+      const colList = await safeInvoke<Collection[]>('list_collections');
+      if (colList) setCollections(colList);
+    } finally {
+      setLoading(false);
+    }
+  }, [t.home.defaultVaultName]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleCreateEntity = async (newEntity: { title: string; entity_type: string; description?: string }) => {
+    const entity: Entity = {
+      id: 'ent_' + Math.random().toString(36).substring(2, 9),
+      entity_type: newEntity.entity_type,
+      title: newEntity.title,
+      description: newEntity.description || null,
+      properties: {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    await safeInvoke('create_entity', { entity });
+    await loadData();
+  };
+
+  const handleCreateMemory = async (newMem: { title: string; content: string; category?: string }) => {
+    const memory: Memory = {
+      id: 'mem_' + Math.random().toString(36).substring(2, 9),
+      title: newMem.title,
+      content: newMem.content,
+      category: newMem.category || null,
+      metadata: {},
+      recorded_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    await safeInvoke('create_memory', { memory });
+    await loadData();
+  };
+
+  const getTitle = () => {
+    switch (currentTab) {
+      case 'home':
+        return t.nav.home;
+      case 'assets':
+        return t.nav.assets;
+      case 'entities':
+        return t.nav.entities;
+      case 'collections':
+        return t.nav.collections;
+      case 'timeline':
+        return t.nav.timeline;
+      case 'memories':
+        return t.nav.memories;
+      case 'settings':
+        return t.nav.settings;
+    }
+  };
+
+  return (
+    <div className="flex h-screen w-screen overflow-hidden bg-neutral-950 text-neutral-100">
+      <Sidebar
+        currentTab={currentTab}
+        onSelectTab={setCurrentTab}
+        vaultName={vaultInfo?.name || t.home.defaultVaultName}
+      />
+
+      <div className="flex-1 flex flex-col h-screen overflow-hidden">
+        <Header vaultInfo={vaultInfo} currentTitle={getTitle()} />
+
+        <main className="flex-1 overflow-y-auto p-6">
+          {loading && !vaultInfo ? (
+            <div className="flex items-center justify-center h-full text-neutral-500 text-xs">
+              {t.common.initializing}
+            </div>
+          ) : (
+            <>
+              {currentTab === 'home' && (
+                <HomeView
+                  vaultInfo={vaultInfo}
+                  vaultStats={vaultStats}
+                  onNavigate={(tab) => setCurrentTab(tab)}
+                />
+              )}
+              {currentTab === 'assets' && (
+                <AssetsView assets={assets} onRefresh={loadData} />
+              )}
+              {currentTab === 'entities' && (
+                <EntitiesView entities={entities} onCreateEntity={handleCreateEntity} />
+              )}
+              {currentTab === 'memories' && (
+                <MemoriesView memories={memories} onCreateMemory={handleCreateMemory} />
+              )}
+              {currentTab === 'collections' && (
+                <CollectionsView collections={collections} />
+              )}
+              {currentTab === 'timeline' && (
+                <div className="p-12 rounded-xl bg-neutral-900 border border-neutral-800 text-center space-y-2 max-w-xl">
+                  <h4 className="text-sm font-medium text-neutral-300">{t.timeline.title}</h4>
+                  <p className="text-xs text-neutral-500">
+                    {t.timeline.desc}
+                  </p>
+                </div>
+              )}
+              {currentTab === 'settings' && (
+                <SettingsView vaultInfo={vaultInfo} />
+              )}
+            </>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+};
+export default App;
