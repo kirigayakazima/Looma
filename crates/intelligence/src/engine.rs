@@ -6,10 +6,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use looma_core::{
-    Asset, AssetKind, AssetService, Collection, CollectionService,
-    EntityFilter, EntityService, LoomaResult, Relation, RelationService,
+    Asset, AssetKind, Collection,
+    EntityFilter, LoomaCore, LoomaResult, Relation,
 };
-use looma_database::LoomaDb;
 
 use crate::models::{SmartInsightsReport, Suggestion, SuggestionType};
 
@@ -18,13 +17,13 @@ pub struct IntelligenceEngine;
 impl IntelligenceEngine {
     /// Generate automatic relation suggestions between assets and entities based on
     /// directory names, file names, type affinities, and keyword occurrences.
-    pub fn suggest_relations(db: &LoomaDb, min_confidence: f32) -> LoomaResult<Vec<Suggestion>> {
-        let entities = db.list_entities(&EntityFilter::default())?;
+    pub fn suggest_relations(core: &LoomaCore, min_confidence: f32) -> LoomaResult<Vec<Suggestion>> {
+        let entities = core.list_entities(&EntityFilter::default())?;
         if entities.is_empty() {
             return Ok(Vec::new());
         }
 
-        let assets = db.list_assets(1000, 0)?;
+        let assets = core.list_assets(1000, 0)?;
         if assets.is_empty() {
             return Ok(Vec::new());
         }
@@ -38,8 +37,8 @@ impl IntelligenceEngine {
             }
 
             // Gather already linked assets for this entity to prevent duplicate suggestions
-            let existing_target_relations = db.list_relations_for_target(&entity.id)?;
-            let existing_source_relations = db.list_relations_for_source(&entity.id)?;
+            let existing_target_relations = core.list_relations_for_target(&entity.id)?;
+            let existing_source_relations = core.list_relations_for_source(&entity.id)?;
 
             let mut linked_asset_ids = HashSet::new();
             for r in existing_target_relations.iter().chain(existing_source_relations.iter()) {
@@ -167,8 +166,8 @@ impl IntelligenceEngine {
     }
 
     /// Suggest tags for assets based on their metadata and characteristics
-    pub fn suggest_tags(db: &LoomaDb) -> LoomaResult<Vec<Suggestion>> {
-        let assets = db.list_assets(500, 0)?;
+    pub fn suggest_tags(core: &LoomaCore) -> LoomaResult<Vec<Suggestion>> {
+        let assets = core.list_assets(500, 0)?;
         let mut suggestions = Vec::new();
 
         for asset in &assets {
@@ -243,9 +242,9 @@ impl IntelligenceEngine {
     }
 
     /// Suggest clustering uncollected assets into collections based on parent directories
-    pub fn suggest_clusters(db: &LoomaDb) -> LoomaResult<Vec<Suggestion>> {
-        let assets = db.list_assets(1000, 0)?;
-        let collections = db.list_collections()?;
+    pub fn suggest_clusters(core: &LoomaCore) -> LoomaResult<Vec<Suggestion>> {
+        let assets = core.list_assets(1000, 0)?;
+        let collections = core.list_collections()?;
 
         let mut existing_col_titles = HashSet::new();
         for c in &collections {
@@ -301,10 +300,10 @@ impl IntelligenceEngine {
     }
 
     /// Generate unified smart insights report
-    pub fn generate_insights(db: &LoomaDb) -> LoomaResult<SmartInsightsReport> {
-        let relation_suggestions = Self::suggest_relations(db, 0.70)?;
-        let tag_suggestions = Self::suggest_tags(db)?;
-        let cluster_suggestions = Self::suggest_clusters(db)?;
+    pub fn generate_insights(core: &LoomaCore) -> LoomaResult<SmartInsightsReport> {
+        let relation_suggestions = Self::suggest_relations(core, 0.70)?;
+        let tag_suggestions = Self::suggest_tags(core)?;
+        let cluster_suggestions = Self::suggest_clusters(core)?;
 
         let total_suggestions =
             relation_suggestions.len() + tag_suggestions.len() + cluster_suggestions.len();
@@ -319,7 +318,8 @@ impl IntelligenceEngine {
 
     /// Apply a specific suggestion by its payload
     pub fn apply_suggestion(
-        db: &LoomaDb,
+        core: &LoomaCore,
+        actor: &str,
         suggestion: &Suggestion,
     ) -> LoomaResult<bool> {
         match suggestion.suggestion_type {
@@ -341,7 +341,7 @@ impl IntelligenceEngine {
                         }),
                         created_at: Utc::now(),
                     };
-                    db.create_relation(&relation)?;
+                    core.create_relation(actor, &relation)?;
                     return Ok(true);
                 }
             }
@@ -366,11 +366,11 @@ impl IntelligenceEngine {
                         created_at: Utc::now(),
                         updated_at: Utc::now(),
                     };
-                    db.create_collection(&col)?;
+                    core.create_collection(actor, &col)?;
 
                     for (_idx, aid_val) in asset_ids.iter().enumerate() {
                         if let Some(aid) = aid_val.as_str() {
-                            let _ = db.add_item_to_collection(&col.id, aid, "asset");
+                            let _ = core.add_item_to_collection(actor, &col.id, aid, "asset");
                         }
                     }
                     return Ok(true);

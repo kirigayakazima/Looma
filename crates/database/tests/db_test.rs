@@ -131,7 +131,8 @@ fn test_in_memory_db_and_services() {
 
     // 8. Backup & Doctor Service
     let manifest = db.generate_manifest().expect("generate manifest failed");
-    assert_eq!(manifest.manifest_version, "1.0.0");
+    assert_eq!(manifest.manifest_version, "2.0.0");
+    assert_eq!(manifest.schema_version, 2);
     assert!(manifest.assets_count >= 1);
 
     // Export backup to temp dir
@@ -153,7 +154,37 @@ fn test_in_memory_db_and_services() {
     assert!(doctor_report.integrity_ok);
     let _ = db.doctor_cleanup_missing().expect("cleanup missing failed");
 
-    // 9. Entity Update & Delete
+    // 9. External Reference Service & Audit Service
+    let ext_ref = looma_core::ExternalReference {
+        id: "ref-1".to_string(),
+        entity_id: Some("ent-1".to_string()),
+        provider: "github".to_string(),
+        title: "Bleach Repo".to_string(),
+        url: "https://github.com/bleach".to_string(),
+        description: None,
+        metadata: serde_json::json!({}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    db.create_external_reference(&ext_ref).expect("create ext ref failed");
+    let ext_refs = db.list_external_references(Some("ent-1")).expect("list ext refs failed");
+    assert_eq!(ext_refs.len(), 1);
+
+    let audit = looma_core::AuditLog {
+        id: "audit-1".to_string(),
+        timestamp: Utc::now(),
+        actor: "test".to_string(),
+        operation: "test.op".to_string(),
+        target_type: "entity".to_string(),
+        target_id: "ent-1".to_string(),
+        result: "success".to_string(),
+        details: serde_json::json!({}),
+    };
+    db.record_audit(&audit).expect("record audit failed");
+    let audits = db.list_recent_audits(10).expect("list audits failed");
+    assert!(!audits.is_empty());
+
+    // 10. Entity Update & Delete
     let mut updated_entity = fetched;
     updated_entity.title = "BLEACH: Thousand-Year Blood War".to_string();
     db.update_entity(&updated_entity).expect("update entity failed");

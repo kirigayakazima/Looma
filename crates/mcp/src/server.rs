@@ -1,20 +1,41 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use looma_core::models::*;
-use looma_core::services::*;
-use looma_database::LoomaDb;
+use looma_core::LoomaCore;
 use looma_scanner::{ScanOptions, Scanner};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpPermissionLevel {
+    /// Read-only access to assets, entities, memories, timeline, and stats
+    ReadOnly = 0,
+    /// Can create/update entities, relations, external references
+    MetadataWrite = 1,
+    /// Can create/update memories, trigger scans
+    ContentWrite = 2,
+    /// Can perform destructive operations: delete items, cleanup missing
+    FullDestructive = 3,
+}
+
 pub struct McpServer {
-    db: LoomaDb,
+    core: LoomaCore,
+    permission: McpPermissionLevel,
 }
 
 impl McpServer {
-    pub fn new(db: LoomaDb) -> Self {
-        Self { db }
+    pub fn new(core: LoomaCore) -> Self {
+        Self {
+            core,
+            permission: McpPermissionLevel::ContentWrite,
+        }
+    }
+
+    pub fn with_permission(core: LoomaCore, permission: McpPermissionLevel) -> Self {
+        Self { core, permission }
     }
 
     pub fn run_stdio(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -66,11 +87,12 @@ impl McpServer {
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
-                        "tools": {}
+                        "tools": {},
+                        "resources": {}
                     },
                     "serverInfo": {
                         "name": "looma-mcp",
-                        "version": "0.1.0"
+                        "version": "0.2.0"
                     }
                 }
             })),
@@ -82,6 +104,41 @@ impl McpServer {
                 "id": req_id,
                 "result": {}
             })),
+
+            "resources/list" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "resources": self.list_resources()
+                }
+            })),
+
+            "resources/read" => {
+                let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+                match self.read_resource(uri) {
+                    Ok((mime_type, text)) => Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "contents": [
+                                {
+                                    "uri": uri,
+                                    "mimeType": mime_type,
+                                    "text": text
+                                }
+                            ]
+                        }
+                    })),
+                    Err(err_msg) => Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32002,
+                            "message": format!("Resource read failed: {err_msg}")
+                        }
+                    })),
+                }
+            }
 
             "tools/list" => Some(json!({
                 "jsonrpc": "2.0",
@@ -130,11 +187,122 @@ impl McpServer {
         }
     }
 
-    fn list_tools(&self) -> Vec<Value> {
+    fn list_resources(&self) -> Vec<Value> {
         vec![
             json!({
+                "uri": "looma://stats",
+                "name": "Vault Statistics & Meta",
+                "description": "Current vault storage size, total indexed assets, entities, and memories",
+                "mimeType": "application/json"
+            }),
+            json!({
+                "uri": "looma://timeline",
+                "name": "Unified Timeline Activity",
+                "description": "Chronological activity stream weaving assets, entities, and memory records",
+                "mimeType": "application/json"
+            }),
+            json!({
+                "uri": "looma://entities",
+                "name": "Entity Catalog",
+                "description": "All typed entity concepts registered in the vault",
+                "mimeType": "application/json"
+            }),
+            json!({
+                "uri": "looma://memories",
+                "name": "Memories & Reflection Notes",
+                "description": "Personal reflection notes, devlogs, and markdown entries",
+                "mimeType": "application/json"
+            }),
+            json!({
+                "uri": "looma://audit",
+                "name": "Recent Audit Trail",
+                "description": "Recent 50 operations recorded across all actors (desktop, cli, mcp)",
+                "mimeType": "application/json"
+            }),
+        ]
+    }
+
+    fn read_resource(&self, uri: &str) -> Result<(&'static str, String), String> {
+        if uri == "looma://stats" {
+            let stats = self.core.get_vault_stats().map_err(|e| e.to_string())?;
+            let info = self.core.get_vault_info().map_err(|e| e.to_string())?;
+            let combined = json!({
+                "info": info,
+                "stats": stats,
+            });
+            let s = serde_json::to_string_pretty(&combined).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
+        if uri == "looma://timeline" {
+            let items = self.core.query_timeline(&TimelineFilter {
+                limit: Some(50),
+                ..Default::default()
+            }).map_err(|e| e.to_string())?;
+            let s = serde_json::to_string_pretty(&items).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
+        if uri == "looma://entities" {
+            let entities = self.core.list_entities(&EntityFilter::default()).map_err(|e| e.to_string())?;
+            let s = serde_json::to_string_pretty(&entities).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
+        if uri == "looma://memories" {
+            let memories = self.core.list_memories(50, 0).map_err(|e| e.to_string())?;
+            let s = serde_json::to_string_pretty(&memories).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
+        if uri == "looma://audit" {
+            let audits = self.core.list_recent_audits(50).map_err(|e| e.to_string())?;
+            let s = serde_json::to_string_pretty(&audits).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
+        if let Some(id) = uri.strip_prefix("looma://asset/") {
+            let asset = self.core.get_asset(id).map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Asset not found: {id}"))?;
+            let relations = self.core.list_relations_for_item(id).unwrap_or_default();
+            let payload = json!({
+                "asset": asset,
+                "relations": relations,
+            });
+            let s = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
+        if let Some(id) = uri.strip_prefix("looma://entity/") {
+            let entity = self.core.get_entity(id).map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Entity not found: {id}"))?;
+            let relations = self.core.list_relations_for_item(id).unwrap_or_default();
+            let external_refs = self.core.list_external_references(Some(id)).unwrap_or_default();
+            let payload = json!({
+                "entity": entity,
+                "relations": relations,
+                "external_references": external_refs,
+            });
+            let s = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
+        if let Some(id) = uri.strip_prefix("looma://memory/") {
+            let memory = self.core.get_memory(id).map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Memory not found: {id}"))?;
+            let s = serde_json::to_string_pretty(&memory).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
+        Err(format!("Unsupported resource URI: {uri}"))
+    }
+
+    fn list_tools(&self) -> Vec<Value> {
+        vec![
+            // Read tools
+            json!({
                 "name": "search_assets",
-                "description": "Search indexed digital assets in the Looma Vault by query, kind, or path",
+                "description": "[Read] Search indexed digital assets in the Looma Vault by query, kind, or path",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -146,7 +314,7 @@ impl McpServer {
             }),
             json!({
                 "name": "get_asset",
-                "description": "Get detailed metadata for a specific indexed asset by ID",
+                "description": "[Read] Get detailed metadata and relations for a specific indexed asset by ID",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -156,20 +324,8 @@ impl McpServer {
                 }
             }),
             json!({
-                "name": "scan_directory",
-                "description": "Trigger an incremental filesystem scan on a directory under Reference Mode",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Absolute filesystem directory path to scan" },
-                        "compute_hash": { "type": "boolean", "description": "Whether to compute streaming SHA-256 (default false)" }
-                    },
-                    "required": ["path"]
-                }
-            }),
-            json!({
                 "name": "search_entities",
-                "description": "Search user-defined entity concepts (anime, projects, devices, games, books)",
+                "description": "[Read] Search user-defined entity concepts (anime, projects, devices, games, books)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -179,8 +335,71 @@ impl McpServer {
                 }
             }),
             json!({
+                "name": "get_entity",
+                "description": "[Read] Get an entity with all linked relations and external references by ID",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "The entity ID" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "list_memories",
+                "description": "[Read] List personal reflections, logs, and Markdown records from the vault",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Number of memories to return (default 20)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "get_memory",
+                "description": "[Read] Fetch memory note content and metadata by ID",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Memory ID" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "get_timeline",
+                "description": "[Read] Fetch unified chronological stream weaving assets, entities, and memories",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Max timeline events to return" },
+                        "item_type": { "type": "string", "description": "Optional filter: asset | entity | memory" }
+                    }
+                }
+            }),
+            json!({
+                "name": "list_external_references",
+                "description": "[Read] List external references (GitHub, Bilibili, Steam, Web) optionally filtered by entity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entity_id": { "type": "string", "description": "Optional entity ID filter" }
+                    }
+                }
+            }),
+            json!({
+                "name": "get_smart_insights",
+                "description": "[Read] Generate AI smart insights: relation suggestions, cluster proposals, and tag recommendations",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+
+            // Metadata write tools
+            json!({
                 "name": "create_entity",
-                "description": "Create a new typed entity concept with custom dynamic properties",
+                "description": "[MetadataWrite] Create a new typed entity concept with custom dynamic properties",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -193,31 +412,23 @@ impl McpServer {
                 }
             }),
             json!({
-                "name": "list_memories",
-                "description": "List personal reflections, logs, and Markdown records from the vault",
+                "name": "update_entity",
+                "description": "[MetadataWrite] Update an existing typed entity concept",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "limit": { "type": "integer", "description": "Number of memories to return (default 20)" }
-                    }
-                }
-            }),
-            json!({
-                "name": "create_memory",
-                "description": "Create a new Markdown memory note in the vault",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "title": { "type": "string", "description": "Memory note title" },
-                        "content": { "type": "string", "description": "Markdown body content" },
-                        "category": { "type": "string", "description": "Category (journal, devlog, note, review)" }
+                        "id": { "type": "string", "description": "Entity ID to update" },
+                        "title": { "type": "string", "description": "Updated title" },
+                        "entity_type": { "type": "string", "description": "Updated entity type" },
+                        "description": { "type": "string", "description": "Updated description" },
+                        "properties": { "type": "object", "description": "Updated properties" }
                     },
-                    "required": ["title", "content"]
+                    "required": ["id", "title", "entity_type"]
                 }
             }),
             json!({
                 "name": "create_relation",
-                "description": "Create a bidirectional relation between two items (assets, entities, memories)",
+                "description": "[MetadataWrite] Create a relation between two vault items (assets, entities, memories)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -231,39 +442,145 @@ impl McpServer {
                 }
             }),
             json!({
-                "name": "get_timeline",
-                "description": "Fetch unified chronological stream weaving assets, entities, and memories",
+                "name": "create_external_reference",
+                "description": "[MetadataWrite] Attach an external URL reference (GitHub repo, Bilibili video, Steam app, Web page) to an entity",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "limit": { "type": "integer", "description": "Max timeline events to return" },
-                        "item_type": { "type": "string", "description": "Optional filter: asset | entity | memory" }
-                    }
+                        "entity_id": { "type": "string", "description": "Parent entity ID to link" },
+                        "provider": { "type": "string", "description": "Provider: github | bilibili | steam | website | document" },
+                        "url": { "type": "string", "description": "External target URL" },
+                        "title": { "type": "string", "description": "Optional human-readable title" },
+                        "external_id": { "type": "string", "description": "Optional provider-native ID (e.g. repo name or video bvid)" },
+                        "metadata": { "type": "object", "description": "Optional provider specific metadata" }
+                    },
+                    "required": ["entity_id", "provider", "url"]
+                }
+            }),
+
+            // Content write tools
+            json!({
+                "name": "create_memory",
+                "description": "[ContentWrite] Create a new Markdown memory note in the vault",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Memory note title" },
+                        "content": { "type": "string", "description": "Markdown body content" },
+                        "category": { "type": "string", "description": "Category (journal, devlog, note, review)" }
+                    },
+                    "required": ["title", "content"]
+                }
+            }),
+            json!({
+                "name": "update_memory",
+                "description": "[ContentWrite] Update an existing Markdown memory note",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Memory ID to update" },
+                        "title": { "type": "string", "description": "Updated note title" },
+                        "content": { "type": "string", "description": "Updated Markdown body" },
+                        "category": { "type": "string", "description": "Updated category" }
+                    },
+                    "required": ["id", "title", "content"]
+                }
+            }),
+            json!({
+                "name": "scan_directory",
+                "description": "[ContentWrite] Trigger an incremental filesystem scan on a directory under Reference Mode",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Absolute filesystem directory path to scan" },
+                        "compute_hash": { "type": "boolean", "description": "Whether to compute streaming SHA-256 (default false)" }
+                    },
+                    "required": ["path"]
+                }
+            }),
+
+            // Destructive write tools
+            json!({
+                "name": "delete_asset",
+                "description": "[DestructiveWrite] Delete an indexed asset record from the vault (does not delete original file)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Asset ID to delete" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "delete_entity",
+                "description": "[DestructiveWrite] Delete a typed entity concept and all its cascade references",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Entity ID to delete" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "delete_memory",
+                "description": "[DestructiveWrite] Delete a memory note record",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Memory ID to delete" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "delete_relation",
+                "description": "[DestructiveWrite] Remove a relation by ID",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Relation ID to delete" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "delete_external_reference",
+                "description": "[DestructiveWrite] Remove an external reference link by ID",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "External reference ID to delete" }
+                    },
+                    "required": ["id"]
                 }
             }),
             json!({
                 "name": "vault_doctor",
-                "description": "Run health and integrity check on the vault database and reference paths",
+                "description": "[Read / DestructiveWrite] Inspect vault health and optionally prune missing files",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "cleanup_missing": { "type": "boolean", "description": "If true, mark missing assets and run VACUUM" }
+                        "cleanup_missing": { "type": "boolean", "description": "If true (requires DestructiveWrite permission), mark missing assets and run VACUUM" }
                     }
-                }
-            }),
-            json!({
-                "name": "get_smart_insights",
-                "description": "Generate Phase 6 AI smart insights: relation suggestions, cluster proposals, and tag recommendations",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {}
                 }
             })
         ]
     }
 
+    fn check_permission(&self, required: McpPermissionLevel, op_name: &str) -> Result<(), String> {
+        if self.permission < required {
+            return Err(format!(
+                "Permission Denied: Operation '{op_name}' requires '{required:?}' permission, but server is running with '{:?}'. Pass '--allow-destructive' to authorize.",
+                self.permission
+            ));
+        }
+        Ok(())
+    }
+
     fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
         match name {
+            // Read tools
             "search_assets" => {
                 let q = args.get("query").and_then(|v| v.as_str()).map(|s| s.to_string());
                 let kind_str = args.get("kind").and_then(|v| v.as_str());
@@ -276,35 +593,24 @@ impl McpServer {
                     limit: Some(limit),
                     ..Default::default()
                 };
-                let assets = self.db.query_assets(&filter).map_err(|e| e.to_string())?;
+                let assets = self.core.query_assets(&filter).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&assets).map_err(|e| e.to_string())
             }
 
             "get_asset" => {
                 let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id parameter")?;
-                let asset = self.db.get_asset_by_id(id).map_err(|e| e.to_string())?;
+                let asset = self.core.get_asset(id).map_err(|e| e.to_string())?;
                 match asset {
-                    Some(a) => serde_json::to_string_pretty(&a).map_err(|e| e.to_string()),
+                    Some(a) => {
+                        let relations = self.core.list_relations_for_item(id).unwrap_or_default();
+                        let payload = json!({
+                            "asset": a,
+                            "relations": relations,
+                        });
+                        serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
+                    }
                     None => Err(format!("Asset not found: {id}")),
                 }
-            }
-
-            "scan_directory" => {
-                let path_str = args.get("path").and_then(|v| v.as_str()).ok_or("Missing path parameter")?;
-                let compute_hash = args.get("compute_hash").and_then(|v| v.as_bool()).unwrap_or(false);
-
-                let options = ScanOptions {
-                    compute_hash,
-                    ..Default::default()
-                };
-                let summary = Scanner::scan_directory(
-                    &self.db,
-                    &PathBuf::from(path_str),
-                    &options,
-                    None::<fn(looma_scanner::ScanProgress)>,
-                )
-                .map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())
             }
 
             "search_entities" => {
@@ -316,11 +622,71 @@ impl McpServer {
                     search_query: q,
                     ..Default::default()
                 };
-                let entities = self.db.list_entities(&filter).map_err(|e| e.to_string())?;
+                let entities = self.core.list_entities(&filter).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&entities).map_err(|e| e.to_string())
             }
 
+            "get_entity" => {
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id parameter")?;
+                let entity = self.core.get_entity(id).map_err(|e| e.to_string())?;
+                match entity {
+                    Some(ent) => {
+                        let relations = self.core.list_relations_for_item(id).unwrap_or_default();
+                        let ext_refs = self.core.list_external_references(Some(id)).unwrap_or_default();
+                        let payload = json!({
+                            "entity": ent,
+                            "relations": relations,
+                            "external_references": ext_refs,
+                        });
+                        serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
+                    }
+                    None => Err(format!("Entity not found: {id}")),
+                }
+            }
+
+            "list_memories" => {
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(20);
+                let memories = self.core.list_memories(limit, 0).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&memories).map_err(|e| e.to_string())
+            }
+
+            "get_memory" => {
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id parameter")?;
+                let memory = self.core.get_memory(id).map_err(|e| e.to_string())?;
+                match memory {
+                    Some(m) => serde_json::to_string_pretty(&m).map_err(|e| e.to_string()),
+                    None => Err(format!("Memory not found: {id}")),
+                }
+            }
+
+            "get_timeline" => {
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+                let item_type = args.get("item_type").and_then(|v| v.as_str()).map(|s| vec![s.to_string()]);
+
+                let filter = TimelineFilter {
+                    item_types: item_type,
+                    limit,
+                    offset: None,
+                };
+                let items = self.core.query_timeline(&filter).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
+            }
+
+            "list_external_references" => {
+                let entity_id = args.get("entity_id").and_then(|v| v.as_str());
+                let refs = self.core.list_external_references(entity_id).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&refs).map_err(|e| e.to_string())
+            }
+
+            "get_smart_insights" => {
+                let insights = looma_intelligence::IntelligenceEngine::generate_insights(&self.core)
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&insights).map_err(|e| e.to_string())
+            }
+
+            // Metadata write tools
             "create_entity" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "create_entity")?;
                 let title = args.get("title").and_then(|v| v.as_str()).ok_or("Missing title")?;
                 let entity_type = args.get("entity_type").and_then(|v| v.as_str()).ok_or("Missing entity_type")?;
                 let desc = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -335,36 +701,38 @@ impl McpServer {
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 };
-                self.db.create_entity(&entity).map_err(|e| e.to_string())?;
+                self.core.create_entity("mcp", &entity).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&entity).map_err(|e| e.to_string())
             }
 
-            "list_memories" => {
-                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(20);
-                let memories = self.db.list_memories(limit, 0).map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&memories).map_err(|e| e.to_string())
-            }
+            "update_entity" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "update_entity")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id")?;
+                let existing = self.core.get_entity(id).map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Entity not found: {id}"))?;
+                let title = args.get("title").and_then(|v| v.as_str()).unwrap_or(&existing.title);
+                let entity_type = args.get("entity_type").and_then(|v| v.as_str()).unwrap_or(&existing.entity_type);
+                let desc = match args.get("description") {
+                    Some(v) => v.as_str().map(|s| s.to_string()),
+                    None => existing.description,
+                };
+                let props = args.get("properties").cloned().unwrap_or(existing.properties);
 
-            "create_memory" => {
-                let title = args.get("title").and_then(|v| v.as_str()).ok_or("Missing title")?;
-                let content = args.get("content").and_then(|v| v.as_str()).ok_or("Missing content")?;
-                let category = args.get("category").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                let memory = Memory {
-                    id: format!("mem_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                let updated = Entity {
+                    id: existing.id,
+                    entity_type: entity_type.to_string(),
                     title: title.to_string(),
-                    content: content.to_string(),
-                    category,
-                    metadata: json!({}),
-                    recorded_at: Utc::now(),
-                    created_at: Utc::now(),
+                    description: desc,
+                    properties: props,
+                    created_at: existing.created_at,
                     updated_at: Utc::now(),
                 };
-                self.db.create_memory(&memory).map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&memory).map_err(|e| e.to_string())
+                self.core.update_entity("mcp", &updated).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())
             }
 
             "create_relation" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "create_relation")?;
                 let source_id = args.get("source_id").and_then(|v| v.as_str()).ok_or("Missing source_id")?;
                 let source_type = args.get("source_type").and_then(|v| v.as_str()).ok_or("Missing source_type")?;
                 let target_id = args.get("target_id").and_then(|v| v.as_str()).ok_or("Missing target_id")?;
@@ -381,28 +749,142 @@ impl McpServer {
                     metadata: json!({}),
                     created_at: Utc::now(),
                 };
-                self.db.create_relation(&relation).map_err(|e| e.to_string())?;
+                self.core.create_relation("mcp", &relation).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&relation).map_err(|e| e.to_string())
             }
 
-            "get_timeline" => {
-                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
-                let item_type = args.get("item_type").and_then(|v| v.as_str()).map(|s| vec![s.to_string()]);
+            "create_external_reference" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "create_external_reference")?;
+                let entity_id = args.get("entity_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let provider = args.get("provider").and_then(|v| v.as_str()).ok_or("Missing provider")?;
+                let url = args.get("url").and_then(|v| v.as_str()).ok_or("Missing url")?;
+                let title = args.get("title").and_then(|v| v.as_str()).unwrap_or(url);
+                let desc = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let meta = args.get("metadata").cloned().unwrap_or(json!({}));
 
-                let filter = TimelineFilter {
-                    item_types: item_type,
-                    limit,
-                    offset: None,
+                let ext_ref = ExternalReference {
+                    id: format!("ref_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    entity_id,
+                    provider: provider.to_string(),
+                    title: title.to_string(),
+                    url: url.to_string(),
+                    description: desc,
+                    metadata: meta,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
                 };
-                let items = self.db.query_timeline(&filter).map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
+                self.core.create_external_reference("mcp", &ext_ref).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&ext_ref).map_err(|e| e.to_string())
+            }
+
+            // Content write tools
+            "create_memory" => {
+                self.check_permission(McpPermissionLevel::ContentWrite, "create_memory")?;
+                let title = args.get("title").and_then(|v| v.as_str()).ok_or("Missing title")?;
+                let content = args.get("content").and_then(|v| v.as_str()).ok_or("Missing content")?;
+                let category = args.get("category").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                let memory = Memory {
+                    id: format!("mem_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    title: title.to_string(),
+                    content: content.to_string(),
+                    category,
+                    metadata: json!({}),
+                    recorded_at: Utc::now(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                self.core.create_memory("mcp", &memory).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&memory).map_err(|e| e.to_string())
+            }
+
+            "update_memory" => {
+                self.check_permission(McpPermissionLevel::ContentWrite, "update_memory")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id")?;
+                let existing = self.core.get_memory(id).map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Memory not found: {id}"))?;
+                let title = args.get("title").and_then(|v| v.as_str()).unwrap_or(&existing.title);
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or(&existing.content);
+                let category = match args.get("category") {
+                    Some(v) => v.as_str().map(|s| s.to_string()),
+                    None => existing.category,
+                };
+
+                let updated = Memory {
+                    id: existing.id,
+                    title: title.to_string(),
+                    content: content.to_string(),
+                    category,
+                    metadata: existing.metadata,
+                    recorded_at: existing.recorded_at,
+                    created_at: existing.created_at,
+                    updated_at: Utc::now(),
+                };
+                self.core.update_memory("mcp", &updated).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())
+            }
+
+            "scan_directory" => {
+                self.check_permission(McpPermissionLevel::ContentWrite, "scan_directory")?;
+                let path_str = args.get("path").and_then(|v| v.as_str()).ok_or("Missing path parameter")?;
+                let compute_hash = args.get("compute_hash").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                let options = ScanOptions {
+                    compute_hash,
+                    ..Default::default()
+                };
+                let summary = Scanner::scan_directory(
+                    &self.core,
+                    &PathBuf::from(path_str),
+                    &options,
+                    None::<fn(looma_scanner::ScanProgress)>,
+                )
+                .map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())
+            }
+
+            // Destructive write tools
+            "delete_asset" => {
+                self.check_permission(McpPermissionLevel::FullDestructive, "delete_asset")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id")?;
+                let deleted = self.core.delete_asset("mcp", id).map_err(|e| e.to_string())?;
+                Ok(json!({ "deleted": deleted, "id": id }).to_string())
+            }
+
+            "delete_entity" => {
+                self.check_permission(McpPermissionLevel::FullDestructive, "delete_entity")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id")?;
+                let deleted = self.core.delete_entity("mcp", id).map_err(|e| e.to_string())?;
+                Ok(json!({ "deleted": deleted, "id": id }).to_string())
+            }
+
+            "delete_memory" => {
+                self.check_permission(McpPermissionLevel::FullDestructive, "delete_memory")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id")?;
+                let deleted = self.core.delete_memory("mcp", id).map_err(|e| e.to_string())?;
+                Ok(json!({ "deleted": deleted, "id": id }).to_string())
+            }
+
+            "delete_relation" => {
+                self.check_permission(McpPermissionLevel::FullDestructive, "delete_relation")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id")?;
+                let deleted = self.core.delete_relation("mcp", id).map_err(|e| e.to_string())?;
+                Ok(json!({ "deleted": deleted, "id": id }).to_string())
+            }
+
+            "delete_external_reference" => {
+                self.check_permission(McpPermissionLevel::FullDestructive, "delete_external_reference")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id")?;
+                let deleted = self.core.delete_external_reference("mcp", id).map_err(|e| e.to_string())?;
+                Ok(json!({ "deleted": deleted, "id": id }).to_string())
             }
 
             "vault_doctor" => {
                 let cleanup = args.get("cleanup_missing").and_then(|v| v.as_bool()).unwrap_or(false);
-                let report = self.db.doctor_inspect().map_err(|e| e.to_string())?;
+                let report = self.core.doctor_inspect().map_err(|e| e.to_string())?;
                 if cleanup {
-                    let cleaned = self.db.doctor_cleanup_missing().map_err(|e| e.to_string())?;
+                    self.check_permission(McpPermissionLevel::FullDestructive, "vault_doctor(cleanup_missing=true)")?;
+                    let cleaned = self.core.doctor_cleanup_missing("mcp").map_err(|e| e.to_string())?;
                     Ok(format!(
                         "Vault Doctor Report:\n{}\nCleaned Missing Items: {cleaned}",
                         serde_json::to_string_pretty(&report).unwrap_or_default()
@@ -410,12 +892,6 @@ impl McpServer {
                 } else {
                     serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
                 }
-            }
-
-            "get_smart_insights" => {
-                let insights = looma_intelligence::IntelligenceEngine::generate_insights(&self.db)
-                    .map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&insights).map_err(|e| e.to_string())
             }
 
             _ => Err(format!("Unknown tool: {name}")),

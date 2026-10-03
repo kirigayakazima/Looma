@@ -1461,14 +1461,26 @@ impl BackupService for LoomaDb {
         let entities_count = self.count_entities()? as usize;
         let memories = self.list_memories(100000, 0)?;
         let collections = self.list_collections()?;
+        let ext_refs = self.list_external_references(None).unwrap_or_default();
 
         let conn = self.conn.lock();
         let relations_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM relations", [], |r| r.get(0))
             .unwrap_or(0);
 
+        let mut checksums = std::collections::HashMap::new();
+        if self.db_path.exists() {
+            if let Ok(bytes) = std::fs::read(&self.db_path) {
+                use sha2::{Sha256, Digest};
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                checksums.insert("vault.db".to_string(), format!("{:x}", hasher.finalize()));
+            }
+        }
+
         Ok(VaultManifest {
-            manifest_version: "1.0.0".to_string(),
+            manifest_version: "2.0.0".to_string(),
+            schema_version: 2,
             created_at: Utc::now(),
             vault_info,
             stats,
@@ -1477,12 +1489,14 @@ impl BackupService for LoomaDb {
             memories_count: memories.len(),
             collections_count: collections.len(),
             relations_count: relations_count as usize,
+            external_references_count: ext_refs.len(),
+            checksums,
         })
     }
 
     fn export_backup(&self, destination_dir: &Path) -> LoomaResult<BackupResult> {
         let start = std::time::Instant::now();
-        let manifest = self.generate_manifest()?;
+        let mut manifest = self.generate_manifest()?;
 
         let timestamp_str = Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let backup_folder_name = format!("looma_vault_backup_{}", timestamp_str);
@@ -1491,17 +1505,12 @@ impl BackupService for LoomaDb {
         std::fs::create_dir_all(&backup_path)
             .map_err(|e| LoomaError::Vault(format!("Failed to create backup directory: {e}")))?;
 
-        // 1. Write manifest.json
-        let manifest_json = serde_json::to_string_pretty(&manifest)
-            .map_err(LoomaError::Serialization)?;
-        std::fs::write(backup_path.join("manifest.json"), manifest_json)
-            .map_err(|e| LoomaError::Vault(format!("Failed to write manifest.json: {e}")))?;
-
-        // 2. Fetch all data
+        // 1. Fetch all data
         let assets = self.query_assets(&AssetFilter::default())?;
         let entities = self.list_entities(&EntityFilter::default())?;
         let memories = self.list_memories(100000, 0)?;
         let collections = self.list_collections()?;
+        let external_references = self.list_external_references(None).unwrap_or_default();
 
         let mut relations = Vec::new();
         {
@@ -1543,7 +1552,7 @@ impl BackupService for LoomaDb {
             }
         }
 
-        // 3. Write vault_dump.json
+        // 2. Write vault_dump.json
         let dump = VaultExportDump {
             manifest: manifest.clone(),
             assets,
@@ -1551,11 +1560,27 @@ impl BackupService for LoomaDb {
             memories: memories.clone(),
             collections,
             relations,
+            external_references,
         };
-        let dump_json = serde_json::to_string_pretty(&dump)
+        let dump_bytes = serde_json::to_vec_pretty(&dump)
             .map_err(LoomaError::Serialization)?;
-        std::fs::write(backup_path.join("vault_dump.json"), dump_json)
+        
+        // Compute checksum of vault_dump.json
+        {
+            use sha2::{Sha256, Digest};
+            let mut hasher = Sha256::new();
+            hasher.update(&dump_bytes);
+            manifest.checksums.insert("vault_dump.json".to_string(), format!("{:x}", hasher.finalize()));
+        }
+
+        std::fs::write(backup_path.join("vault_dump.json"), &dump_bytes)
             .map_err(|e| LoomaError::Vault(format!("Failed to write vault_dump.json: {e}")))?;
+
+        // 3. Write manifest.json with updated checksums
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(LoomaError::Serialization)?;
+        std::fs::write(backup_path.join("manifest.json"), manifest_json)
+            .map_err(|e| LoomaError::Vault(format!("Failed to write manifest.json: {e}")))?;
 
         // 4. Export human-readable Markdown notes in memories/ subfolder
         let memories_dir = backup_path.join("memories");
@@ -1621,6 +1646,7 @@ impl BackupService for LoomaDb {
         let mut restored_memories = 0;
         let mut restored_collections = 0;
         let mut restored_relations = 0;
+        let mut restored_external_references = 0;
 
         for asset in dump.assets {
             self.upsert_asset(&asset)?;
@@ -1657,6 +1683,15 @@ impl BackupService for LoomaDb {
             restored_relations += 1;
         }
 
+        for ext_ref in dump.external_references {
+            if self.get_external_reference_by_id(&ext_ref.id)?.is_some() {
+                let _ = self.update_external_reference(&ext_ref);
+            } else {
+                let _ = self.create_external_reference(&ext_ref);
+            }
+            restored_external_references += 1;
+        }
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(RestoreResult {
@@ -1665,6 +1700,7 @@ impl BackupService for LoomaDb {
             restored_memories,
             restored_collections,
             restored_relations,
+            restored_external_references,
             duration_ms,
         })
     }
@@ -1726,5 +1762,212 @@ impl BackupService for LoomaDb {
         }
 
         Ok(missing_count)
+    }
+}
+
+impl AuditService for LoomaDb {
+    fn record_audit(&self, log: &AuditLog) -> LoomaResult<()> {
+        let conn = self.conn.lock();
+        let details_json = serde_json::to_string(&log.details)
+            .unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "INSERT INTO audit_logs (id, timestamp, actor, operation, target_type, target_id, result, details_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                log.id,
+                log.timestamp.to_rfc3339(),
+                log.actor,
+                log.operation,
+                log.target_type,
+                log.target_id,
+                log.result,
+                details_json
+            ],
+        )
+        .map_err(|e| LoomaError::Database(format!("Failed to record audit log: {e}")))?;
+        Ok(())
+    }
+
+    fn list_recent_audits(&self, limit: usize) -> LoomaResult<Vec<AuditLog>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, timestamp, actor, operation, target_type, target_id, result, details_json
+                 FROM audit_logs
+                 ORDER BY timestamp DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| LoomaError::Database(format!("Failed to prepare audit query: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                let id: String = row.get(0)?;
+                let ts_str: String = row.get(1)?;
+                let actor: String = row.get(2)?;
+                let operation: String = row.get(3)?;
+                let target_type: String = row.get(4)?;
+                let target_id: String = row.get(5)?;
+                let result: String = row.get(6)?;
+                let details_json_str: String = row.get(7)?;
+
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let details = serde_json::from_str(&details_json_str).unwrap_or(serde_json::json!({}));
+
+                Ok(AuditLog {
+                    id,
+                    timestamp,
+                    actor,
+                    operation,
+                    target_type,
+                    target_id,
+                    result,
+                    details,
+                })
+            })
+            .map_err(|e| LoomaError::Database(format!("Failed to query audit logs: {e}")))?;
+
+        let mut logs = Vec::new();
+        for r in rows {
+            if let Ok(l) = r {
+                logs.push(l);
+            }
+        }
+        Ok(logs)
+    }
+}
+
+impl ExternalReferenceService for LoomaDb {
+    fn list_external_references(&self, entity_id: Option<&str>) -> LoomaResult<Vec<ExternalReference>> {
+        let conn = self.conn.lock();
+        let mut query = "SELECT id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at FROM external_references".to_string();
+        if entity_id.is_some() {
+            query.push_str(" WHERE entity_id = ?1");
+        }
+        query.push_str(" ORDER BY created_at DESC");
+
+        let mut stmt = conn.prepare(&query)
+            .map_err(|e| LoomaError::Database(format!("Failed to prepare ext refs query: {e}")))?;
+
+        let rows: Vec<ExternalReference> = match entity_id {
+            Some(eid) => {
+                stmt.query_map(params![eid], |row| {
+                    let id: String = row.get(0)?;
+                    let entity_id: Option<String> = row.get(1)?;
+                    let provider: String = row.get(2)?;
+                    let title: String = row.get(3)?;
+                    let url: String = row.get(4)?;
+                    let description: Option<String> = row.get(5)?;
+                    let meta_str: String = row.get(6)?;
+                    let c_str: String = row.get(7)?;
+                    let u_str: String = row.get(8)?;
+
+                    let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::json!({}));
+                    let created_at = DateTime::parse_from_rfc3339(&c_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+                    let updated_at = DateTime::parse_from_rfc3339(&u_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+
+                    Ok(ExternalReference { id, entity_id, provider, title, url, description, metadata, created_at, updated_at })
+                }).map_err(|e| LoomaError::Database(e.to_string()))?.filter_map(|r| r.ok()).collect()
+            }
+            None => {
+                stmt.query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let entity_id: Option<String> = row.get(1)?;
+                    let provider: String = row.get(2)?;
+                    let title: String = row.get(3)?;
+                    let url: String = row.get(4)?;
+                    let description: Option<String> = row.get(5)?;
+                    let meta_str: String = row.get(6)?;
+                    let c_str: String = row.get(7)?;
+                    let u_str: String = row.get(8)?;
+
+                    let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::json!({}));
+                    let created_at = DateTime::parse_from_rfc3339(&c_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+                    let updated_at = DateTime::parse_from_rfc3339(&u_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+
+                    Ok(ExternalReference { id, entity_id, provider, title, url, description, metadata, created_at, updated_at })
+                }).map_err(|e| LoomaError::Database(e.to_string()))?.filter_map(|r| r.ok()).collect()
+            }
+        };
+
+        Ok(rows)
+    }
+
+    fn get_external_reference_by_id(&self, id: &str) -> LoomaResult<Option<ExternalReference>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at
+             FROM external_references WHERE id = ?1",
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let res = stmt.query_row(params![id], |row| {
+            let id: String = row.get(0)?;
+            let entity_id: Option<String> = row.get(1)?;
+            let provider: String = row.get(2)?;
+            let title: String = row.get(3)?;
+            let url: String = row.get(4)?;
+            let description: Option<String> = row.get(5)?;
+            let meta_str: String = row.get(6)?;
+            let c_str: String = row.get(7)?;
+            let u_str: String = row.get(8)?;
+
+            let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::json!({}));
+            let created_at = DateTime::parse_from_rfc3339(&c_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+            let updated_at = DateTime::parse_from_rfc3339(&u_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+
+            Ok(ExternalReference { id, entity_id, provider, title, url, description, metadata, created_at, updated_at })
+        }).optional().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        Ok(res)
+    }
+
+    fn create_external_reference(&self, reference: &ExternalReference) -> LoomaResult<()> {
+        let conn = self.conn.lock();
+        let meta_str = serde_json::to_string(&reference.metadata).unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                reference.id,
+                reference.entity_id,
+                reference.provider,
+                reference.title,
+                reference.url,
+                reference.description,
+                meta_str,
+                reference.created_at.to_rfc3339(),
+                reference.updated_at.to_rfc3339(),
+            ],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn update_external_reference(&self, reference: &ExternalReference) -> LoomaResult<()> {
+        let conn = self.conn.lock();
+        let meta_str = serde_json::to_string(&reference.metadata).unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "UPDATE external_references
+             SET entity_id = ?1, provider = ?2, title = ?3, url = ?4, description = ?5, metadata_json = ?6, updated_at = ?7
+             WHERE id = ?8",
+            params![
+                reference.entity_id,
+                reference.provider,
+                reference.title,
+                reference.url,
+                reference.description,
+                meta_str,
+                reference.updated_at.to_rfc3339(),
+                reference.id,
+            ],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn delete_external_reference(&self, id: &str) -> LoomaResult<bool> {
+        let conn = self.conn.lock();
+        let count = conn.execute("DELETE FROM external_references WHERE id = ?1", params![id])
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(count > 0)
     }
 }

@@ -9,11 +9,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "001_initial",
-    sql: include_str!("migrations/001_initial.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "001_initial",
+        sql: include_str!("migrations/001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "002_audit_and_references",
+        sql: include_str!("migrations/002_audit_and_references.sql"),
+    },
+];
 
 pub fn run_migrations(conn: &mut Connection) -> LoomaResult<()> {
     // Ensure migrations table exists

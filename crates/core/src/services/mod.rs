@@ -1,4 +1,7 @@
+pub mod cloud;
+
 use crate::error::LoomaResult;
+pub use cloud::{CloudStorage, LocalDirStorage, RemoteObjectMeta};
 use crate::models::{
     Asset, AssetFilter, BackupResult, Collection, CollectionItem, Entity, EntityFilter, Memory,
     Relation, RestoreResult, TimelineFilter, TimelineItem, VaultDoctorReport, VaultInfo,
@@ -68,3 +71,17 @@ pub trait BackupService: Send + Sync {
     fn doctor_inspect(&self) -> LoomaResult<VaultDoctorReport>;
     fn doctor_cleanup_missing(&self) -> LoomaResult<usize>;
 }
+
+pub trait AuditService: Send + Sync {
+    fn record_audit(&self, log: &crate::models::AuditLog) -> LoomaResult<()>;
+    fn list_recent_audits(&self, limit: usize) -> LoomaResult<Vec<crate::models::AuditLog>>;
+}
+
+pub trait ExternalReferenceService: Send + Sync {
+    fn list_external_references(&self, entity_id: Option<&str>) -> LoomaResult<Vec<crate::models::ExternalReference>>;
+    fn get_external_reference_by_id(&self, id: &str) -> LoomaResult<Option<crate::models::ExternalReference>>;
+    fn create_external_reference(&self, reference: &crate::models::ExternalReference) -> LoomaResult<()>;
+    fn update_external_reference(&self, reference: &crate::models::ExternalReference) -> LoomaResult<()>;
+    fn delete_external_reference(&self, id: &str) -> LoomaResult<bool>;
+}
+

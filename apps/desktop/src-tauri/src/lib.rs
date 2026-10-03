@@ -1,15 +1,16 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use base64::Engine;
 use directories::ProjectDirs;
 use tauri::{Emitter, State};
 
 use looma_core::models::*;
-use looma_core::services::*;
+use looma_core::LoomaCore;
 use looma_database::LoomaDb;
 use looma_scanner::{ScanOptions, ScanProgress, ScanSummary, Scanner};
 
 pub struct AppState {
-    pub db: LoomaDb,
+    pub core: LoomaCore,
 }
 
 // -------------------------------------------------------------
@@ -18,29 +19,29 @@ pub struct AppState {
 
 #[tauri::command]
 fn get_vault_info(state: State<'_, AppState>) -> Result<VaultInfo, String> {
-    state.db.get_vault_info().map_err(|e| e.to_string())
+    state.core.get_vault_info().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_vault_stats(state: State<'_, AppState>) -> Result<VaultStats, String> {
-    state.db.get_vault_stats().map_err(|e| e.to_string())
+    state.core.get_vault_stats().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn list_assets(filter: Option<AssetFilter>, state: State<'_, AppState>) -> Result<Vec<Asset>, String> {
-    state.db
+    state.core
         .query_assets(&filter.unwrap_or_default())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_asset(id: String, state: State<'_, AppState>) -> Result<Option<Asset>, String> {
-    state.db.get_asset_by_id(&id).map_err(|e| e.to_string())
+    state.core.get_asset(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_asset(id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    state.db.delete_asset(&id).map_err(|e| e.to_string())
+    state.core.delete_asset("desktop", &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -56,7 +57,7 @@ async fn scan_directory(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ScanSummary, String> {
-    let db = state.db.clone();
+    let core = state.core.clone();
     let root = PathBuf::from(path);
     let options = ScanOptions {
         compute_hash: compute_hash.unwrap_or(true),
@@ -67,7 +68,7 @@ async fn scan_directory(
         let progress_cb = move |progress: ScanProgress| {
             let _ = app_handle.emit("scan-progress", &progress);
         };
-        Scanner::scan_directory(&db, &root, &options, Some(progress_cb))
+        Scanner::scan_directory(&core, &root, &options, Some(progress_cb))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -128,118 +129,118 @@ fn read_asset_preview(path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn list_entities(filter: Option<EntityFilter>, state: State<'_, AppState>) -> Result<Vec<Entity>, String> {
-    state.db
+    state.core
         .list_entities(&filter.unwrap_or_default())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_entity(id: String, state: State<'_, AppState>) -> Result<Option<Entity>, String> {
-    state.db.get_entity_by_id(&id).map_err(|e| e.to_string())
+    state.core.get_entity(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn create_entity(entity: Entity, state: State<'_, AppState>) -> Result<(), String> {
-    state.db.create_entity(&entity).map_err(|e| e.to_string())
+    state.core.create_entity("desktop", &entity).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn update_entity(entity: Entity, state: State<'_, AppState>) -> Result<(), String> {
-    state.db.update_entity(&entity).map_err(|e| e.to_string())
+    state.core.update_entity("desktop", &entity).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_entity(id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    state.db.delete_entity(&id).map_err(|e| e.to_string())
+    state.core.delete_entity("desktop", &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn create_relation(relation: Relation, state: State<'_, AppState>) -> Result<(), String> {
-    state.db.create_relation(&relation).map_err(|e| e.to_string())
+    state.core.create_relation("desktop", &relation).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_relation(id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    state.db.delete_relation(&id).map_err(|e| e.to_string())
+    state.core.delete_relation("desktop", &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_relation_between(source_id: String, target_id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    state.db.delete_relation_between(&source_id, &target_id).map_err(|e| e.to_string())
+    state.core.delete_relation_between("desktop", &source_id, &target_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn list_relations_for_item(item_id: String, state: State<'_, AppState>) -> Result<Vec<Relation>, String> {
-    state.db.list_relations_for_item(&item_id).map_err(|e| e.to_string())
+    state.core.list_relations_for_item(&item_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn list_memories(limit: Option<usize>, offset: Option<usize>, state: State<'_, AppState>) -> Result<Vec<Memory>, String> {
-    state.db
+    state.core
         .list_memories(limit.unwrap_or(50), offset.unwrap_or(0))
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn create_memory(memory: Memory, state: State<'_, AppState>) -> Result<(), String> {
-    state.db.create_memory(&memory).map_err(|e| e.to_string())
+    state.core.create_memory("desktop", &memory).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn update_memory(memory: Memory, state: State<'_, AppState>) -> Result<(), String> {
-    state.db.update_memory(&memory).map_err(|e| e.to_string())
+    state.core.update_memory("desktop", &memory).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_memory(id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    state.db.delete_memory(&id).map_err(|e| e.to_string())
+    state.core.delete_memory("desktop", &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn list_collections(state: State<'_, AppState>) -> Result<Vec<Collection>, String> {
-    state.db.list_collections().map_err(|e| e.to_string())
+    state.core.list_collections().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_collection(id: String, state: State<'_, AppState>) -> Result<Option<Collection>, String> {
-    state.db.get_collection_by_id(&id).map_err(|e| e.to_string())
+    state.core.get_collection(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn create_collection(collection: Collection, state: State<'_, AppState>) -> Result<(), String> {
-    state.db.create_collection(&collection).map_err(|e| e.to_string())
+    state.core.create_collection("desktop", &collection).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_collection(id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    state.db.delete_collection(&id).map_err(|e| e.to_string())
+    state.core.delete_collection("desktop", &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn list_collection_items(collection_id: String, state: State<'_, AppState>) -> Result<Vec<CollectionItem>, String> {
-    state.db.list_items_for_collection(&collection_id).map_err(|e| e.to_string())
+    state.core.list_collection_items(&collection_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn add_item_to_collection(collection_id: String, item_id: String, item_type: String, state: State<'_, AppState>) -> Result<(), String> {
-    state.db.add_item_to_collection(&collection_id, &item_id, &item_type).map_err(|e| e.to_string())
+    state.core.add_item_to_collection("desktop", &collection_id, &item_id, &item_type).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn remove_item_from_collection(collection_id: String, item_id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    state.db.remove_item_from_collection(&collection_id, &item_id).map_err(|e| e.to_string())
+    state.core.remove_item_from_collection("desktop", &collection_id, &item_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn query_timeline(filter: Option<TimelineFilter>, state: State<'_, AppState>) -> Result<Vec<TimelineItem>, String> {
-    state.db
+    state.core
         .query_timeline(&filter.unwrap_or_default())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn generate_manifest(state: State<'_, AppState>) -> Result<VaultManifest, String> {
-    state.db.generate_manifest().map_err(|e| e.to_string())
+    state.core.generate_manifest().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -250,30 +251,30 @@ fn export_backup(destination_dir: Option<String>, state: State<'_, AppState>) ->
         resolve_default_vault_path().join("backups")
     };
     std::fs::create_dir_all(&dest_path).map_err(|e| e.to_string())?;
-    state.db.export_backup(&dest_path).map_err(|e| e.to_string())
+    state.core.export_backup("desktop", &dest_path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn restore_backup(backup_path: String, state: State<'_, AppState>) -> Result<RestoreResult, String> {
     let p = PathBuf::from(backup_path);
-    state.db.restore_backup(&p).map_err(|e| e.to_string())
+    state.core.restore_backup("desktop", &p).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn doctor_inspect(state: State<'_, AppState>) -> Result<VaultDoctorReport, String> {
-    state.db.doctor_inspect().map_err(|e| e.to_string())
+    state.core.doctor_inspect().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn doctor_cleanup_missing(state: State<'_, AppState>) -> Result<usize, String> {
-    state.db.doctor_cleanup_missing().map_err(|e| e.to_string())
+    state.core.doctor_cleanup_missing("desktop").map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_smart_insights(
     state: State<'_, AppState>,
 ) -> Result<looma_intelligence::SmartInsightsReport, String> {
-    looma_intelligence::IntelligenceEngine::generate_insights(&state.db).map_err(|e| e.to_string())
+    looma_intelligence::IntelligenceEngine::generate_insights(&state.core).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -281,8 +282,48 @@ fn apply_smart_suggestion(
     state: State<'_, AppState>,
     suggestion: looma_intelligence::Suggestion,
 ) -> Result<bool, String> {
-    looma_intelligence::IntelligenceEngine::apply_suggestion(&state.db, &suggestion)
+    looma_intelligence::IntelligenceEngine::apply_suggestion(&state.core, "desktop", &suggestion)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_recent_audits(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<AuditLog>, String> {
+    state.core.list_recent_audits(limit.unwrap_or(50)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_external_references(
+    entity_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ExternalReference>, String> {
+    state.core.list_external_references(entity_id.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_external_reference(
+    reference: ExternalReference,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.core.create_external_reference("desktop", &reference).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_external_reference(
+    reference: ExternalReference,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.core.update_external_reference("desktop", &reference).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_external_reference(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    state.core.delete_external_reference("desktop", &id).map_err(|e| e.to_string())
 }
 
 fn resolve_default_vault_path() -> PathBuf {
@@ -306,10 +347,11 @@ pub fn run() {
             panic!("{}", msg);
         }
     };
+    let core = LoomaCore::new(Arc::new(db));
 
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { db })
+        .manage(AppState { core })
         .invoke_handler(tauri::generate_handler![
             get_vault_info,
             get_vault_stats,
@@ -347,7 +389,12 @@ pub fn run() {
             doctor_inspect,
             doctor_cleanup_missing,
             get_smart_insights,
-            apply_smart_suggestion
+            apply_smart_suggestion,
+            list_recent_audits,
+            list_external_references,
+            create_external_reference,
+            update_external_reference,
+            delete_external_reference
         ])
         .run(tauri::generate_context!())
     {

@@ -1,16 +1,20 @@
 pub mod asset;
+pub mod audit;
 pub mod backup;
 pub mod collection;
 pub mod entity;
+pub mod external_reference;
 pub mod memory;
 pub mod relation;
 pub mod timeline;
 pub mod vault;
 
 pub use asset::*;
+pub use audit::*;
 pub use backup::*;
 pub use collection::*;
 pub use entity::*;
+pub use external_reference::*;
 pub use memory::*;
 pub use relation::*;
 pub use timeline::*;

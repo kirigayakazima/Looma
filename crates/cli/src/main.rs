@@ -1,11 +1,12 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use directories::ProjectDirs;
 use serde_json::json;
 
 use looma_core::models::*;
-use looma_core::services::*;
+use looma_core::LoomaCore;
 use looma_database::LoomaDb;
 use looma_mcp::McpServer;
 use looma_scanner::{ScanOptions, Scanner};
@@ -13,7 +14,7 @@ use looma_scanner::{ScanOptions, Scanner};
 #[derive(Parser)]
 #[command(name = "looma")]
 #[command(author = "Looma Team")]
-#[command(version = "0.1.0")]
+#[command(version = "0.2.0")]
 #[command(about = "Looma - Local-First Personal Digital Vault CLI", long_about = None)]
 struct Cli {
     #[arg(short, long, help = "Custom vault root directory path")]
@@ -57,6 +58,18 @@ enum Commands {
 
     #[command(about = "View unified chronological timeline")]
     Timeline(TimelineArgs),
+
+    #[command(about = "Manage external references (GitHub, Bilibili, Steam, Web)")]
+    Ref {
+        #[command(subcommand)]
+        action: RefCommands,
+    },
+
+    #[command(about = "Display recent audit trail of operations")]
+    Audit {
+        #[arg(short, long, default_value_t = 30, help = "Number of audit entries to show")]
+        limit: usize,
+    },
 
     #[command(about = "Vault backup, export, and disaster recovery")]
     Backup(BackupArgs),
@@ -112,6 +125,11 @@ enum AssetCommands {
         #[arg(help = "Asset ID")]
         id: String,
     },
+    #[command(about = "Delete an indexed asset record from the vault")]
+    Delete {
+        #[arg(help = "Asset ID")]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -135,6 +153,11 @@ enum EntityCommands {
         #[arg(short, long, help = "Optional description")]
         desc: Option<String>,
     },
+    #[command(about = "Delete an entity concept by ID")]
+    Delete {
+        #[arg(help = "Entity ID")]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -152,6 +175,36 @@ enum MemoryCommands {
         content: String,
         #[arg(short, long, default_value = "journal", help = "Category")]
         category: String,
+    },
+    #[command(about = "Delete a memory note by ID")]
+    Delete {
+        #[arg(help = "Memory ID")]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RefCommands {
+    #[command(about = "List external references")]
+    List {
+        #[arg(short, long, help = "Filter by entity ID")]
+        entity_id: Option<String>,
+    },
+    #[command(about = "Add an external reference")]
+    Add {
+        #[arg(short, long, help = "Provider (github, bilibili, steam, website, document)")]
+        provider: String,
+        #[arg(short, long, help = "Target URL")]
+        url: String,
+        #[arg(short, long, help = "Display title")]
+        title: Option<String>,
+        #[arg(short, long, help = "Associated Entity ID")]
+        entity_id: Option<String>,
+    },
+    #[command(about = "Delete an external reference by ID")]
+    Delete {
+        #[arg(help = "Reference ID")]
+        id: String,
     },
 }
 
@@ -198,22 +251,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Mcp command does not print headers so that stdio remains clean for JSON-RPC
     if let Commands::Mcp = cli.command {
         let db = LoomaDb::open(&vault_path)?;
-        let server = McpServer::new(db);
+        let core = LoomaCore::new(Arc::new(db));
+        let server = McpServer::new(core);
         server.run_stdio()?;
         return Ok(());
     }
 
     println!("======================================================");
-    println!("  Looma Digital Vault CLI (Phase 5 - Local-First)     ");
+    println!("  Looma Digital Vault CLI (v0.2.0 - Core Facade)      ");
     println!("  Vault Root: {}", vault_path.display());
     println!("======================================================\n");
 
     let db = LoomaDb::open(&vault_path)?;
+    let core = LoomaCore::new(Arc::new(db));
 
     match cli.command {
         Commands::Status => {
-            let info = db.get_vault_info()?;
-            let stats = db.get_vault_stats()?;
+            let info = core.get_vault_info()?;
+            let stats = core.get_vault_stats()?;
             println!("Vault Name:       {}", info.name);
             println!("Architecture:     v{}", info.version);
             println!("Database:         {}", info.database_path.display());
@@ -232,7 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             };
             let summary = Scanner::scan_directory(
-                &db,
+                &core,
                 &args.path,
                 &options,
                 Some(|prog: looma_scanner::ScanProgress| {
@@ -263,7 +318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 limit: Some(25),
                 ..Default::default()
             };
-            let assets = db.query_assets(&filter)?;
+            let assets = core.query_assets(&filter)?;
             println!("Found {} assets matching '{}':\n", assets.len(), args.query);
             for a in assets {
                 let name = a.path.as_deref().unwrap_or(&a.id);
@@ -279,7 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     limit: Some(limit),
                     ..Default::default()
                 };
-                let assets = db.query_assets(&filter)?;
+                let assets = core.query_assets(&filter)?;
                 println!("Indexed Assets (showing up to {}):\n", limit);
                 for a in assets {
                     let name = a.path.as_deref().unwrap_or(&a.id);
@@ -287,8 +342,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             AssetCommands::Get { id } => {
-                if let Some(a) = db.get_asset_by_id(&id)? {
+                if let Some(a) = core.get_asset(&id)? {
                     println!("{}", serde_json::to_string_pretty(&a)?);
+                } else {
+                    println!("Asset not found: {}", id);
+                }
+            }
+            AssetCommands::Delete { id } => {
+                let deleted = core.delete_asset("cli", &id)?;
+                if deleted {
+                    println!("Asset deleted: {}", id);
                 } else {
                     println!("Asset not found: {}", id);
                 }
@@ -301,7 +364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     entity_type,
                     ..Default::default()
                 };
-                let entities = db.list_entities(&filter)?;
+                let entities = core.list_entities(&filter)?;
                 println!("Entity Concepts ({}):\n", entities.len());
                 for e in entities {
                     println!("  * [{}] {} (ID: {})", e.entity_type, e.title, e.id);
@@ -311,7 +374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             EntityCommands::Get { id } => {
-                if let Some(e) = db.get_entity_by_id(&id)? {
+                if let Some(e) = core.get_entity(&id)? {
                     println!("{}", serde_json::to_string_pretty(&e)?);
                 } else {
                     println!("Entity not found: {}", id);
@@ -327,14 +390,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 };
-                db.create_entity(&entity)?;
+                core.create_entity("cli", &entity)?;
                 println!("Created entity: {} (ID: {})", title, entity.id);
+            }
+            EntityCommands::Delete { id } => {
+                let deleted = core.delete_entity("cli", &id)?;
+                if deleted {
+                    println!("Entity deleted: {}", id);
+                } else {
+                    println!("Entity not found: {}", id);
+                }
             }
         },
 
         Commands::Memory { action } => match action {
             MemoryCommands::List { limit } => {
-                let memories = db.list_memories(limit, 0)?;
+                let memories = core.list_memories(limit, 0)?;
                 println!("Memory Notes ({}):\n", memories.len());
                 for m in memories {
                     let cat = m.category.unwrap_or_else(|| "general".to_string());
@@ -352,13 +423,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 };
-                db.create_memory(&memory)?;
+                core.create_memory("cli", &memory)?;
                 println!("Created memory note: {} (ID: {})", title, memory.id);
+            }
+            MemoryCommands::Delete { id } => {
+                let deleted = core.delete_memory("cli", &id)?;
+                if deleted {
+                    println!("Memory deleted: {}", id);
+                } else {
+                    println!("Memory not found: {}", id);
+                }
             }
         },
 
+        Commands::Ref { action } => match action {
+            RefCommands::List { entity_id } => {
+                let refs = core.list_external_references(entity_id.as_deref())?;
+                println!("External References ({}):\n", refs.len());
+                for r in refs {
+                    println!("  [{}] {} -> {} (ID: {})", r.provider, r.title, r.url, r.id);
+                }
+            }
+            RefCommands::Add { provider, url, title, entity_id } => {
+                let ext_ref = ExternalReference {
+                    id: format!("ref_{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    entity_id,
+                    provider,
+                    title: title.unwrap_or_else(|| url.clone()),
+                    url: url.clone(),
+                    description: None,
+                    metadata: json!({}),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                core.create_external_reference("cli", &ext_ref)?;
+                println!("Created external reference: {} (ID: {})", ext_ref.url, ext_ref.id);
+            }
+            RefCommands::Delete { id } => {
+                let deleted = core.delete_external_reference("cli", &id)?;
+                if deleted {
+                    println!("External reference deleted: {}", id);
+                } else {
+                    println!("External reference not found: {}", id);
+                }
+            }
+        },
+
+        Commands::Audit { limit } => {
+            let logs = core.list_recent_audits(limit)?;
+            println!("Recent Audit Trail (showing up to {}):\n", limit);
+            for log in logs {
+                println!(
+                    "  {} [{}] {} {} on {} -> {}",
+                    log.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                    log.actor,
+                    log.operation,
+                    log.target_type,
+                    log.target_id,
+                    log.result
+                );
+            }
+        }
+
         Commands::Collection => {
-            let cols = db.list_collections()?;
+            let cols = core.list_collections()?;
             println!("Collections ({}):\n", cols.len());
             for c in cols {
                 println!("  # {} (ID: {})", c.title, c.id);
@@ -374,7 +502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 limit: Some(args.limit),
                 offset: None,
             };
-            let items = db.query_timeline(&filter)?;
+            let items = core.query_timeline(&filter)?;
             println!("Timeline Stream ({} events):\n", items.len());
             for item in items {
                 println!(
@@ -389,12 +517,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Backup(args) => {
             if let Some(dest) = args.export {
                 println!("Exporting vault backup to {}...", dest.display());
-                let res = db.export_backup(&dest)?;
+                let res = core.export_backup("cli", &dest)?;
                 println!("Backup successful! Path: {}", res.backup_path);
                 println!("Duration: {} ms", res.duration_ms);
             } else if let Some(restore_path) = args.restore {
                 println!("Restoring vault from {}...", restore_path.display());
-                let res = db.restore_backup(&restore_path)?;
+                let res = core.restore_backup("cli", &restore_path)?;
                 println!("Restore complete!");
                 println!("  Restored Assets:      {}", res.restored_assets);
                 println!("  Restored Entities:    {}", res.restored_entities);
@@ -402,7 +530,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  Restored Collections: {}", res.restored_collections);
                 println!("  Duration:             {} ms", res.duration_ms);
             } else {
-                let manifest = db.generate_manifest()?;
+                let manifest = core.generate_manifest()?;
                 println!("Vault Manifest Snapshot:");
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
             }
@@ -410,7 +538,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Doctor(args) => {
             println!("Running Vault Doctor inspection...");
-            let report = db.doctor_inspect()?;
+            let report = core.doctor_inspect()?;
             println!("  SQLite Integrity:      {}", report.integrity_message);
             println!("  Active Assets:         {}", report.active_assets);
             println!("  Total Assets:          {}", report.total_assets);
@@ -426,14 +554,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if args.clean {
                 println!("\nCleaning missing assets and compacting database (VACUUM)...");
-                let cleaned = db.doctor_cleanup_missing()?;
+                let cleaned = core.doctor_cleanup_missing("cli")?;
                 println!("Successfully cleaned {} missing items and compacted SQLite database!", cleaned);
             }
         }
 
         Commands::Suggest(args) => {
             println!("Generating Smart Insights & Relationship Suggestions (Phase 6)...");
-            let insights = looma_intelligence::IntelligenceEngine::generate_insights(&db)?;
+            let insights = looma_intelligence::IntelligenceEngine::generate_insights(&core)?;
 
             println!(
                 "\nFound {} suggestions in total: {} relations, {} tags, {} clusters\n",
@@ -483,14 +611,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut applied_count = 0;
                 for s in &insights.relation_suggestions {
                     if s.confidence >= 0.85 {
-                        if looma_intelligence::IntelligenceEngine::apply_suggestion(&db, s)? {
+                        if looma_intelligence::IntelligenceEngine::apply_suggestion(&core, "cli", s)? {
                             applied_count += 1;
                         }
                     }
                 }
                 for s in &insights.cluster_suggestions {
                     if s.confidence >= 0.85 {
-                        if looma_intelligence::IntelligenceEngine::apply_suggestion(&db, s)? {
+                        if looma_intelligence::IntelligenceEngine::apply_suggestion(&core, "cli", s)? {
                             applied_count += 1;
                         }
                     }
