@@ -237,6 +237,187 @@ impl LoomaCore {
         Ok(deleted)
     }
 
+    // --- Personal Records / Work Domain (Expansion Pack) ---
+    pub fn create_work(
+        &self,
+        actor: &str,
+        title: &str,
+        work_type: WorkType,
+        status: RecordStatus,
+        original_title: Option<String>,
+        description: Option<String>,
+    ) -> LoomaResult<Entity> {
+        let entity = Entity::new_work(title, work_type, status, original_title, description);
+        self.create_entity(actor, &entity)?;
+        Ok(entity)
+    }
+
+    pub fn update_work_status(
+        &self,
+        actor: &str,
+        entity_id: &str,
+        status: RecordStatus,
+    ) -> LoomaResult<Entity> {
+        let mut entity = self.get_entity(entity_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity not found: {entity_id}")))?;
+        
+        let mut props = entity.properties.clone();
+        if let Some(obj) = props.as_object_mut() {
+            obj.insert("status".to_string(), json!(status.as_str()));
+            if let Some(work_val) = obj.get_mut("work") {
+                if let Some(work_obj) = work_val.as_object_mut() {
+                    work_obj.insert("status".to_string(), json!(status));
+                }
+            }
+        }
+        entity.properties = props;
+        entity.updated_at = Utc::now();
+        self.update_entity(actor, &entity)?;
+        Ok(entity)
+    }
+
+    pub fn list_works(
+        &self,
+        work_type: Option<&str>,
+        status: Option<&str>,
+    ) -> LoomaResult<Vec<Entity>> {
+        let all_entities = self.list_entities(&EntityFilter::default())?;
+        let filtered = all_entities
+            .into_iter()
+            .filter(|e| {
+                let meta = e.as_work_metadata();
+                if meta.is_none() && e.entity_type != "work" && e.properties.get("domain").and_then(|v| v.as_str()) != Some("work") {
+                    if WorkType::parse(&e.entity_type) == WorkType::Other && e.entity_type != "other" {
+                        return false;
+                    }
+                }
+
+                if let Some(wt) = work_type {
+                    let parsed = WorkType::parse(wt);
+                    let e_type = meta.as_ref().map(|m| m.work_type).unwrap_or_else(|| WorkType::parse(&e.entity_type));
+                    if e_type != parsed && e.entity_type != wt {
+                        return false;
+                    }
+                }
+
+                if let Some(st) = status {
+                    let parsed_st = RecordStatus::parse(st);
+                    let e_st = meta.as_ref().map(|m| m.status).unwrap_or_else(|| {
+                        e.properties.get("status")
+                            .and_then(|v| v.as_str())
+                            .map(RecordStatus::parse)
+                            .unwrap_or(RecordStatus::Unknown)
+                    });
+                    if e_st != parsed_st {
+                        return false;
+                    }
+                }
+
+                true
+            })
+            .collect();
+        Ok(filtered)
+    }
+
+    pub fn get_work_summary(&self, entity_id: &str) -> LoomaResult<Option<WorkSummary>> {
+        let entity = match self.get_entity(entity_id)? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+
+        let work_metadata = entity.as_work_metadata();
+        let relations = self.list_relations_for_item(entity_id)?;
+        let external_references = self.list_external_references(Some(entity_id))?;
+
+        let mut linked_assets = Vec::new();
+        let mut linked_memories = Vec::new();
+
+        for r in &relations {
+            let other_id = if r.source_id == entity_id {
+                &r.target_id
+            } else {
+                &r.source_id
+            };
+            let other_type = if r.source_id == entity_id {
+                &r.target_type
+            } else {
+                &r.source_type
+            };
+
+            if other_type == "asset" {
+                if let Ok(Some(asset)) = self.get_asset(other_id) {
+                    linked_assets.push(asset);
+                }
+            } else if other_type == "memory" {
+                if let Ok(Some(memory)) = self.get_memory(other_id) {
+                    linked_memories.push(memory);
+                }
+            }
+        }
+
+        let mut linked_collections = Vec::new();
+        if let Ok(collections) = self.list_collections() {
+            for col in collections {
+                if let Ok(items) = self.list_collection_items(&col.id) {
+                    if items.iter().any(|item| item.item_id == entity_id) {
+                        linked_collections.push(col);
+                    }
+                }
+            }
+        }
+
+        Ok(Some(WorkSummary {
+            entity,
+            work_metadata,
+            relations,
+            linked_assets,
+            linked_memories,
+            linked_collections,
+            external_references,
+        }))
+    }
+
+    pub fn link_work_asset(
+        &self,
+        actor: &str,
+        work_id: &str,
+        asset_id: &str,
+        relation_type: Option<&str>,
+    ) -> LoomaResult<Relation> {
+        let rel = Relation {
+            id: format!("rel_{}", &Uuid::new_v4().to_string()[..8]),
+            source_id: work_id.to_string(),
+            source_type: "entity".to_string(),
+            relation_type: relation_type.unwrap_or(relation_types::ATTACHES).to_string(),
+            target_id: asset_id.to_string(),
+            target_type: "asset".to_string(),
+            metadata: json!({ "domain": "personal_records" }),
+            created_at: Utc::now(),
+        };
+        self.create_relation(actor, &rel)?;
+        Ok(rel)
+    }
+
+    pub fn link_work_memory(
+        &self,
+        actor: &str,
+        work_id: &str,
+        memory_id: &str,
+    ) -> LoomaResult<Relation> {
+        let rel = Relation {
+            id: format!("rel_{}", &Uuid::new_v4().to_string()[..8]),
+            source_id: memory_id.to_string(),
+            source_type: "memory".to_string(),
+            relation_type: relation_types::REFERENCED_BY.to_string(),
+            target_id: work_id.to_string(),
+            target_type: "entity".to_string(),
+            metadata: json!({ "domain": "personal_records" }),
+            created_at: Utc::now(),
+        };
+        self.create_relation(actor, &rel)?;
+        Ok(rel)
+    }
+
     // --- Relations ---
     pub fn list_relations_for_item(&self, item_id: &str) -> LoomaResult<Vec<Relation>> {
         self.repo.list_relations_for_item(item_id)

@@ -8,6 +8,7 @@ pub mod memory;
 pub mod relation;
 pub mod timeline;
 pub mod vault;
+pub mod work;
 
 pub use asset::*;
 pub use audit::*;
@@ -19,3 +20,4 @@ pub use memory::*;
 pub use relation::*;
 pub use timeline::*;
 pub use vault::*;
+pub use work::*;

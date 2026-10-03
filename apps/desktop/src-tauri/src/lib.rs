@@ -326,6 +326,49 @@ fn delete_external_reference(
     state.core.delete_external_reference("desktop", &id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn list_works(
+    work_type: Option<String>,
+    status: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<Entity>, String> {
+    state.core.list_works(work_type.as_deref(), status.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_work_summary(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<WorkSummary>, String> {
+    state.core.get_work_summary(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_work(
+    title: String,
+    kind: String,
+    status: String,
+    original_title: Option<String>,
+    description: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Entity, String> {
+    let work_type = WorkType::parse(&kind);
+    let record_status = RecordStatus::parse(&status);
+    state.core.create_work("desktop", &title, work_type, record_status, original_title, description)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_work_status(
+    id: String,
+    status: String,
+    state: State<'_, AppState>,
+) -> Result<Entity, String> {
+    let record_status = RecordStatus::parse(&status);
+    state.core.update_work_status("desktop", &id, record_status)
+        .map_err(|e| e.to_string())
+}
+
 fn resolve_default_vault_path() -> PathBuf {
     if let Some(proj_dirs) = ProjectDirs::from("com", "looma", "Looma") {
         let data_dir = proj_dirs.data_dir();
@@ -394,7 +437,11 @@ pub fn run() {
             list_external_references,
             create_external_reference,
             update_external_reference,
-            delete_external_reference
+            delete_external_reference,
+            list_works,
+            get_work_summary,
+            create_work,
+            update_work_status
         ])
         .run(tauri::generate_context!())
     {

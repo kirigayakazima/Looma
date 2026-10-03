@@ -214,6 +214,12 @@ impl McpServer {
                 "mimeType": "application/json"
             }),
             json!({
+                "uri": "looma://works",
+                "name": "Personal Works & Cultural Records",
+                "description": "Catalog of all registered works (Anime, Games, Movies, Books, Projects, Music)",
+                "mimeType": "application/json"
+            }),
+            json!({
                 "uri": "looma://audit",
                 "name": "Recent Audit Trail",
                 "description": "Recent 50 operations recorded across all actors (desktop, cli, mcp)",
@@ -249,6 +255,12 @@ impl McpServer {
             return Ok(("application/json", s));
         }
 
+        if uri == "looma://works" || uri.starts_with("looma://works?") {
+            let works = self.core.list_works(None, None).map_err(|e| e.to_string())?;
+            let s = serde_json::to_string_pretty(&works).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
+        }
+
         if uri == "looma://memories" {
             let memories = self.core.list_memories(50, 0).map_err(|e| e.to_string())?;
             let s = serde_json::to_string_pretty(&memories).map_err(|e| e.to_string())?;
@@ -273,18 +285,14 @@ impl McpServer {
             return Ok(("application/json", s));
         }
 
-        if let Some(id) = uri.strip_prefix("looma://entity/") {
-            let entity = self.core.get_entity(id).map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Entity not found: {id}"))?;
-            let relations = self.core.list_relations_for_item(id).unwrap_or_default();
-            let external_refs = self.core.list_external_references(Some(id)).unwrap_or_default();
-            let payload = json!({
-                "entity": entity,
-                "relations": relations,
-                "external_references": external_refs,
-            });
-            let s = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
-            return Ok(("application/json", s));
+        let entity_id_opt = uri.strip_prefix("looma://entity/").or_else(|| uri.strip_prefix("looma://work/"));
+        if let Some(id) = entity_id_opt {
+            if let Some(summary) = self.core.get_work_summary(id).map_err(|e| e.to_string())? {
+                let s = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
+                return Ok(("application/json", s));
+            } else {
+                return Err(format!("Entity/Work not found: {id}"));
+            }
         }
 
         if let Some(id) = uri.strip_prefix("looma://memory/") {
@@ -325,12 +333,13 @@ impl McpServer {
             }),
             json!({
                 "name": "search_entities",
-                "description": "[Read] Search user-defined entity concepts (anime, projects, devices, games, books)",
+                "description": "[Read] Search user-defined entity concepts and personal records (anime, game, movie, book, project, person)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Search keyword for entity title or description" },
-                        "entity_type": { "type": "string", "description": "Optional filter by type" }
+                        "entity_type": { "type": "string", "description": "Optional filter by type (anime, game, movie, book, project, person, work, etc.)" },
+                        "status": { "type": "string", "description": "Optional status filter (planned, in_progress, completed, paused, dropped, revisit)" }
                     }
                 }
             }),
@@ -399,13 +408,16 @@ impl McpServer {
             // Metadata write tools
             json!({
                 "name": "create_entity",
-                "description": "[MetadataWrite] Create a new typed entity concept with custom dynamic properties",
+                "description": "[MetadataWrite] Create a new typed entity concept or personal work (anime, game, book, movie, project, person)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "title": { "type": "string", "description": "Title of the entity" },
-                        "entity_type": { "type": "string", "description": "Type of entity (e.g. anime, project, hardware, book)" },
+                        "title": { "type": "string", "description": "Title or name of the entity/work" },
+                        "entity_type": { "type": "string", "description": "Type of entity (anime, game, movie, tv_series, music, book, novel, project, person, concept)" },
+                        "status": { "type": "string", "description": "Optional personal consumption status (planned, in_progress, completed, paused, dropped, revisit)" },
                         "description": { "type": "string", "description": "Optional description" },
+                        "original_title": { "type": "string", "description": "Optional original native title" },
+                        "release_year": { "type": "integer", "description": "Optional release year" },
                         "properties": { "type": "object", "description": "Optional dynamic JSON key-value properties" }
                     },
                     "required": ["title", "entity_type"]
@@ -616,31 +628,37 @@ impl McpServer {
             "search_entities" => {
                 let q = args.get("query").and_then(|v| v.as_str()).map(|s| s.to_string());
                 let entity_type = args.get("entity_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let status_filter = args.get("status").and_then(|v| v.as_str());
 
                 let filter = EntityFilter {
                     entity_type,
                     search_query: q,
                     ..Default::default()
                 };
-                let entities = self.core.list_entities(&filter).map_err(|e| e.to_string())?;
+                let mut entities = self.core.list_entities(&filter).map_err(|e| e.to_string())?;
+                if let Some(status) = status_filter {
+                    let parsed = RecordStatus::parse(status);
+                    entities.retain(|e| {
+                        let st = e.as_work_metadata()
+                            .map(|m| m.status)
+                            .unwrap_or_else(|| {
+                                e.properties.get("status")
+                                    .and_then(|v| v.as_str())
+                                    .map(RecordStatus::parse)
+                                    .unwrap_or(RecordStatus::Unknown)
+                            });
+                        st == parsed
+                    });
+                }
                 serde_json::to_string_pretty(&entities).map_err(|e| e.to_string())
             }
 
             "get_entity" => {
                 let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id parameter")?;
-                let entity = self.core.get_entity(id).map_err(|e| e.to_string())?;
-                match entity {
-                    Some(ent) => {
-                        let relations = self.core.list_relations_for_item(id).unwrap_or_default();
-                        let ext_refs = self.core.list_external_references(Some(id)).unwrap_or_default();
-                        let payload = json!({
-                            "entity": ent,
-                            "relations": relations,
-                            "external_references": ext_refs,
-                        });
-                        serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
-                    }
-                    None => Err(format!("Entity not found: {id}")),
+                if let Some(summary) = self.core.get_work_summary(id).map_err(|e| e.to_string())? {
+                    serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())
+                } else {
+                    Err(format!("Entity not found: {id}"))
                 }
             }
 
@@ -690,7 +708,30 @@ impl McpServer {
                 let title = args.get("title").and_then(|v| v.as_str()).ok_or("Missing title")?;
                 let entity_type = args.get("entity_type").and_then(|v| v.as_str()).ok_or("Missing entity_type")?;
                 let desc = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let props = args.get("properties").cloned().unwrap_or(json!({}));
+                let mut props = args.get("properties").cloned().unwrap_or(json!({}));
+                if let Some(status_str) = args.get("status").and_then(|v| v.as_str()) {
+                    props["status"] = json!(status_str);
+                }
+
+                let work_type = WorkType::parse(entity_type);
+                if work_type != WorkType::Other || entity_type == "work" {
+                    let status = props.get("status")
+                        .and_then(|v| v.as_str())
+                        .map(RecordStatus::parse)
+                        .unwrap_or(RecordStatus::Planned);
+                    props["domain"] = json!("work");
+                    props["status"] = json!(status.as_str());
+                    props["work"] = json!(WorkMetadata {
+                        work_type,
+                        status,
+                        original_title: args.get("original_title").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        release_year: args.get("release_year").and_then(|v| v.as_u64()).map(|n| n as u32),
+                        start_date: args.get("start_date").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        end_date: args.get("end_date").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        cover_asset_id: None,
+                        rating: args.get("rating").and_then(|v| v.as_f64()).map(|f| f as f32),
+                    });
+                }
 
                 let entity = Entity {
                     id: format!("ent_{}", &uuid::Uuid::new_v4().to_string()[..8]),

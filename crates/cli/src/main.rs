@@ -47,6 +47,12 @@ enum Commands {
         action: EntityCommands,
     },
 
+    #[command(about = "Personal Records & Works management (Anime, Game, Movie, Book, Project, Music)")]
+    Work {
+        #[command(subcommand)]
+        action: WorkCommands,
+    },
+
     #[command(about = "Memory notes management commands")]
     Memory {
         #[command(subcommand)]
@@ -180,6 +186,51 @@ enum MemoryCommands {
     Delete {
         #[arg(help = "Memory ID")]
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkCommands {
+    #[command(about = "List registered works")]
+    List {
+        #[arg(short = 't', long, help = "Filter by type (anime, game, movie, tv_series, music, book, novel, etc.)")]
+        kind: Option<String>,
+        #[arg(short, long, help = "Filter by status (planned, in_progress, completed, paused, dropped, revisit)")]
+        status: Option<String>,
+    },
+    #[command(about = "Register a new personal work")]
+    Create {
+        #[arg(help = "Title of the work")]
+        title: String,
+        #[arg(short = 't', long, default_value = "anime", help = "Work type (anime, game, movie, book, project, etc.)")]
+        kind: String,
+        #[arg(short, long, default_value = "planned", help = "Status (planned, in_progress, completed, paused, dropped, revisit)")]
+        status: String,
+        #[arg(long, help = "Original native title")]
+        orig: Option<String>,
+        #[arg(short, long, help = "Description or synopsis")]
+        desc: Option<String>,
+    },
+    #[command(about = "Update consumption status of a work")]
+    Status {
+        #[arg(help = "Work Entity ID")]
+        id: String,
+        #[arg(help = "New status (planned, in_progress, completed, paused, dropped, revisit)")]
+        status: String,
+    },
+    #[command(about = "Inspect full personal record and digital footprint for a work")]
+    Show {
+        #[arg(help = "Work Entity ID")]
+        id: String,
+    },
+    #[command(about = "Link a work to an asset or memory")]
+    Relate {
+        #[arg(help = "Work Entity ID")]
+        work_id: String,
+        #[arg(help = "Target Item ID (Asset ID or Memory ID)")]
+        target_id: String,
+        #[arg(short, long, default_value = "referenced_by", help = "Relation descriptor (attaches, referenced_by, created_by, etc.)")]
+        relation: String,
     },
 }
 
@@ -399,6 +450,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Entity deleted: {}", id);
                 } else {
                     println!("Entity not found: {}", id);
+                }
+            }
+        },
+
+        Commands::Work { action } => match action {
+            WorkCommands::List { kind, status } => {
+                let works = core.list_works(kind.as_deref(), status.as_deref())?;
+                println!("Personal Records & Works ({}):\n", works.len());
+                for w in works {
+                    let meta = w.as_work_metadata();
+                    let st = meta.as_ref().map(|m| m.status.as_str()).unwrap_or("unknown");
+                    println!("  * [{:^10}] [{:^11}] {} (ID: {})", w.entity_type, st, w.title, w.id);
+                    if let Some(d) = &w.description {
+                        println!("      {}", d);
+                    }
+                }
+            }
+            WorkCommands::Create { title, kind, status, orig, desc } => {
+                let work_type = WorkType::parse(&kind);
+                let record_status = RecordStatus::parse(&status);
+                let work = core.create_work("cli", &title, work_type, record_status, orig, desc)?;
+                println!("Registered new work: {} [{}] ({}) ID: {}", title, work_type.as_str(), record_status.as_str(), work.id);
+            }
+            WorkCommands::Status { id, status } => {
+                let record_status = RecordStatus::parse(&status);
+                let updated = core.update_work_status("cli", &id, record_status)?;
+                println!("Updated work status: {} -> [{}]", updated.title, record_status.as_str());
+            }
+            WorkCommands::Show { id } => {
+                if let Some(summary) = core.get_work_summary(&id)? {
+                    let w = &summary.entity;
+                    let meta = summary.work_metadata.as_ref();
+                    let st = meta.map(|m| m.status.as_str()).unwrap_or("unknown");
+                    println!("======================================================");
+                    println!("  Work: {} [{}]", w.title, w.entity_type);
+                    println!("  ID:     {}", w.id);
+                    println!("  Status: {}", st);
+                    if let Some(m) = meta {
+                        if let Some(orig) = &m.original_title {
+                            println!("  Native: {}", orig);
+                        }
+                    }
+                    if let Some(d) = &w.description {
+                        println!("  Description: {}", d);
+                    }
+                    println!("------------------------------------------------------");
+                    println!("  Linked Assets ({})", summary.linked_assets.len());
+                    for a in &summary.linked_assets {
+                        let path = a.path.as_deref().unwrap_or(&a.id);
+                        println!("    - [{:?}] {}", a.kind, path);
+                    }
+                    println!("  Linked Memories ({})", summary.linked_memories.len());
+                    for m in &summary.linked_memories {
+                        println!("    - [{}] {}", m.recorded_at.format("%Y-%m-%d"), m.title);
+                    }
+                    println!("  Linked Collections ({})", summary.linked_collections.len());
+                    for c in &summary.linked_collections {
+                        println!("    - # {}", c.title);
+                    }
+                    println!("  External References ({})", summary.external_references.len());
+                    for r in &summary.external_references {
+                        println!("    - [{}] {} -> {}", r.provider, r.title, r.url);
+                    }
+                    println!("======================================================");
+                } else {
+                    println!("Work not found: {}", id);
+                }
+            }
+            WorkCommands::Relate { work_id, target_id, relation } => {
+                if target_id.starts_with("mem_") {
+                    let rel = core.link_work_memory("cli", &work_id, &target_id)?;
+                    println!("Linked work {} <-> memory {} with [{}] (Rel ID: {})", work_id, target_id, rel.relation_type, rel.id);
+                } else {
+                    let rel = core.link_work_asset("cli", &work_id, &target_id, Some(&relation))?;
+                    println!("Linked work {} <-> asset {} with [{}] (Rel ID: {})", work_id, target_id, rel.relation_type, rel.id);
                 }
             }
         },
