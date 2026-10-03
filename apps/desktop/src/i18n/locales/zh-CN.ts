@@ -18,6 +18,7 @@ export const zhCN = {
   },
   nav: {
     home: '概览',
+    works: '作品档案',
     assets: '数字资产',
     entities: '实体概念',
     collections: '集合收藏',

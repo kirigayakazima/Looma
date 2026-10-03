@@ -162,4 +162,25 @@ fn test_work_domain_lifecycle_and_summary() {
 
     let planned_works = core.list_works(None, Some("planned")).expect("list planned failed");
     assert_eq!(planned_works.len(), 0);
+
+    // 10. Update and verify Work Progress (e.g. Episode 24/24)
+    let prog_updated = core.update_work_progress(
+        "test-suite",
+        &anime.id,
+        24.0,
+        Some(ProgressPositionType::Episode),
+        Some(24.0),
+        Some("集".to_string()),
+    ).expect("failed to update progress");
+
+    let prog_meta = prog_updated.as_work_metadata().unwrap();
+    let prog = prog_meta.progress.unwrap();
+    assert_eq!(prog.position, 24.0);
+    assert_eq!(prog.position_type, ProgressPositionType::Episode);
+    assert_eq!(prog.total_positions, Some(24.0));
+    assert_eq!(prog.unit.as_deref(), Some("集"));
+
+    // Check progress is reflected in WorkSummary
+    let final_summary = core.get_work_summary(&anime.id).unwrap().unwrap();
+    assert_eq!(final_summary.work_metadata.unwrap().progress.unwrap().position, 24.0);
 }

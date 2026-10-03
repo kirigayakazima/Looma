@@ -218,6 +218,19 @@ enum WorkCommands {
         #[arg(help = "New status (planned, in_progress, completed, paused, dropped, revisit)")]
         status: String,
     },
+    #[command(about = "Update consumption progress (episode, chapter, page, percentage)")]
+    Progress {
+        #[arg(help = "Work Entity ID")]
+        id: String,
+        #[arg(help = "Current position (e.g. 24 or 520)")]
+        position: f64,
+        #[arg(short = 't', long, help = "Position type: episode, chapter, page, minute, percentage, custom")]
+        kind: Option<String>,
+        #[arg(long, help = "Total positions (e.g. 24 episodes total)")]
+        total: Option<f64>,
+        #[arg(short, long, help = "Custom unit (e.g. 集, 话, 页, %)")]
+        unit: Option<String>,
+    },
     #[command(about = "Inspect full personal record and digital footprint for a work")]
     Show {
         #[arg(help = "Work Entity ID")]
@@ -461,7 +474,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for w in works {
                     let meta = w.as_work_metadata();
                     let st = meta.as_ref().map(|m| m.status.as_str()).unwrap_or("unknown");
-                    println!("  * [{:^10}] [{:^11}] {} (ID: {})", w.entity_type, st, w.title, w.id);
+                    let prog_str = meta.as_ref().and_then(|m| m.progress.as_ref()).map(|p| {
+                        let u = p.unit.as_deref().unwrap_or(p.position_type.as_str());
+                        if let Some(t) = p.total_positions {
+                            format!(" [{:.0}/{:.0} {}]", p.position, t, u)
+                        } else {
+                            format!(" [{:.0} {}]", p.position, u)
+                        }
+                    }).unwrap_or_default();
+                    println!("  * [{:^10}] [{:^11}]{} {} (ID: {})", w.entity_type, st, prog_str, w.title, w.id);
                     if let Some(d) = &w.description {
                         println!("      {}", d);
                     }
@@ -478,6 +499,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let updated = core.update_work_status("cli", &id, record_status)?;
                 println!("Updated work status: {} -> [{}]", updated.title, record_status.as_str());
             }
+            WorkCommands::Progress { id, position, kind, total, unit } => {
+                let p_type = kind.map(|k| ProgressPositionType::parse(&k));
+                let updated = core.update_work_progress("cli", &id, position, p_type, total, unit)?;
+                let meta = updated.as_work_metadata();
+                let prog_display = meta.and_then(|m| m.progress).map(|p| {
+                    let u = p.unit.as_deref().unwrap_or(p.position_type.as_str());
+                    if let Some(t) = p.total_positions {
+                        format!("{:.0}/{:.0} {}", p.position, t, u)
+                    } else {
+                        format!("{:.0} {}", p.position, u)
+                    }
+                }).unwrap_or_else(|| format!("{position}"));
+                println!("Updated work progress: {} -> [{}]", updated.title, prog_display);
+            }
             WorkCommands::Show { id } => {
                 if let Some(summary) = core.get_work_summary(&id)? {
                     let w = &summary.entity;
@@ -488,6 +523,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  ID:     {}", w.id);
                     println!("  Status: {}", st);
                     if let Some(m) = meta {
+                        if let Some(p) = &m.progress {
+                            let u = p.unit.as_deref().unwrap_or(p.position_type.as_str());
+                            if let Some(t) = p.total_positions {
+                                println!("  Progress: {:.0} / {:.0} {} ({})", p.position, t, u, p.position_type.as_str());
+                            } else {
+                                println!("  Progress: {:.0} {} ({})", p.position, u, p.position_type.as_str());
+                            }
+                        }
                         if let Some(orig) = &m.original_title {
                             println!("  Native: {}", orig);
                         }

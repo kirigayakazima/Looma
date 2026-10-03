@@ -276,6 +276,95 @@ impl LoomaCore {
         Ok(entity)
     }
 
+    pub fn update_work_progress(
+        &self,
+        actor: &str,
+        entity_id: &str,
+        position: f64,
+        position_type: Option<ProgressPositionType>,
+        total_positions: Option<f64>,
+        unit: Option<String>,
+    ) -> LoomaResult<Entity> {
+        let mut entity = self.get_entity(entity_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity not found: {entity_id}")))?;
+
+        let mut props = entity.properties.clone();
+        if let Some(obj) = props.as_object_mut() {
+            let mut work_meta: WorkMetadata = if let Some(w) = obj.get("work") {
+                serde_json::from_value(w.clone()).unwrap_or_else(|_| WorkMetadata {
+                    work_type: WorkType::parse(&entity.entity_type),
+                    status: RecordStatus::InProgress,
+                    original_title: None,
+                    release_year: None,
+                    start_date: None,
+                    end_date: None,
+                    cover_asset_id: None,
+                    rating: None,
+                    progress: None,
+                })
+            } else {
+                WorkMetadata {
+                    work_type: WorkType::parse(&entity.entity_type),
+                    status: RecordStatus::InProgress,
+                    original_title: None,
+                    release_year: None,
+                    start_date: None,
+                    end_date: None,
+                    cover_asset_id: None,
+                    rating: None,
+                    progress: None,
+                }
+            };
+
+            let p_type = position_type.unwrap_or_else(|| {
+                work_meta.progress.as_ref().map(|p| p.position_type.clone()).unwrap_or_else(|| {
+                    match work_meta.work_type {
+                        WorkType::Anime | WorkType::TvSeries => ProgressPositionType::Episode,
+                        WorkType::Manga => ProgressPositionType::Chapter,
+                        WorkType::Book | WorkType::Novel => ProgressPositionType::Chapter,
+                        WorkType::Movie | WorkType::Documentary => ProgressPositionType::Minute,
+                        _ => ProgressPositionType::Custom("step".to_string()),
+                    }
+                })
+            });
+
+            let total = total_positions.or_else(|| work_meta.progress.as_ref().and_then(|p| p.total_positions));
+            let unit_str = unit.or_else(|| work_meta.progress.as_ref().and_then(|p| p.unit.clone()));
+
+            let progress = WorkProgress {
+                position,
+                position_type: p_type,
+                total_positions: total,
+                unit: unit_str,
+                updated_at: Utc::now(),
+            };
+
+            work_meta.progress = Some(progress.clone());
+            obj.insert("work".to_string(), json!(work_meta));
+            obj.insert("progress".to_string(), json!(progress));
+        }
+
+        entity.properties = props;
+        entity.updated_at = Utc::now();
+        self.update_entity(actor, &entity)?;
+
+        self.record_audit(
+            actor,
+            "work.progress_update",
+            "entity",
+            entity_id,
+            "success",
+            json!({ "position": position }),
+        )?;
+
+        self.emit_event(
+            actor,
+            DomainEvent::EntityUpdated { id: entity_id.to_string() },
+        );
+
+        Ok(entity)
+    }
+
     pub fn list_works(
         &self,
         work_type: Option<&str>,

@@ -187,3 +187,76 @@ export interface SmartInsightsReport {
   tag_suggestions: Suggestion[];
   cluster_suggestions: Suggestion[];
 }
+
+export interface ExternalReference {
+  id: string;
+  entity_id: string | null;
+  provider: string;
+  title: string;
+  url: string;
+  description: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export type WorkType =
+  | 'anime'
+  | 'manga'
+  | 'game'
+  | 'movie'
+  | 'tv_series'
+  | 'music'
+  | 'album'
+  | 'book'
+  | 'novel'
+  | 'documentary'
+  | 'other';
+
+export type RecordStatus =
+  | 'planned'
+  | 'in_progress'
+  | 'completed'
+  | 'paused'
+  | 'dropped'
+  | 'revisit'
+  | 'unknown';
+
+export type ProgressPositionType =
+  | 'episode'
+  | 'chapter'
+  | 'page'
+  | 'minute'
+  | 'percentage'
+  | string;
+
+export interface WorkProgress {
+  position: number;
+  position_type: ProgressPositionType;
+  total_positions: number | null;
+  unit: string | null;
+  updated_at: string;
+}
+
+export interface WorkMetadata {
+  work_type: WorkType;
+  status: RecordStatus;
+  original_title: string | null;
+  release_year: number | null;
+  start_date: string | null;
+  end_date: string | null;
+  cover_asset_id: string | null;
+  rating: number | null;
+  progress?: WorkProgress | null;
+}
+
+export interface WorkSummary {
+  entity: Entity;
+  work_metadata: WorkMetadata | null;
+  relations: Relation[];
+  linked_assets: Asset[];
+  linked_memories: Memory[];
+  linked_collections: Collection[];
+  external_references: ExternalReference[];
+}
+

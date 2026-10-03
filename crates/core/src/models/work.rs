@@ -123,6 +123,58 @@ pub mod relation_types {
     pub const ATTACHES: &str = "attaches";
 }
 
+/// Type of position for tracking consumption progress
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressPositionType {
+    Episode,
+    Chapter,
+    Page,
+    Minute,
+    Percentage,
+    Custom(String),
+}
+
+impl ProgressPositionType {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Episode => "episode",
+            Self::Chapter => "chapter",
+            Self::Page => "page",
+            Self::Minute => "minute",
+            Self::Percentage => "percentage",
+            Self::Custom(s) => s.as_str(),
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "episode" | "ep" => Self::Episode,
+            "chapter" | "ch" => Self::Chapter,
+            "page" | "p" => Self::Page,
+            "minute" | "min" => Self::Minute,
+            "percentage" | "percent" | "%" => Self::Percentage,
+            other => Self::Custom(other.to_string()),
+        }
+    }
+}
+
+impl Default for ProgressPositionType {
+    fn default() -> Self {
+        Self::Episode
+    }
+}
+
+/// Consumption progress of a personal work (episodes, chapters, pages, etc.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkProgress {
+    pub position: f64,
+    pub position_type: ProgressPositionType,
+    pub total_positions: Option<f64>,
+    pub unit: Option<String>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
 /// Strongly-typed view of a Work entity (stored transparently in Entity.properties)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkMetadata {
@@ -134,6 +186,8 @@ pub struct WorkMetadata {
     pub end_date: Option<String>,
     pub cover_asset_id: Option<String>,
     pub rating: Option<f32>,
+    #[serde(default)]
+    pub progress: Option<WorkProgress>,
 }
 
 impl Entity {
@@ -154,6 +208,7 @@ impl Entity {
             end_date: None,
             cover_asset_id: None,
             rating: None,
+            progress: None,
         };
 
         Self {
@@ -170,6 +225,19 @@ impl Entity {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    /// Attach initial progress to this work
+    pub fn with_progress(mut self, progress: WorkProgress) -> Self {
+        if let Some(obj) = self.properties.as_object_mut() {
+            if let Some(work_val) = obj.get_mut("work") {
+                if let Some(work_obj) = work_val.as_object_mut() {
+                    work_obj.insert("progress".to_string(), json!(progress));
+                }
+            }
+            obj.insert("progress".to_string(), json!(progress));
+        }
+        self
     }
 
     /// Create a new Entity representing a Person or Character
@@ -228,6 +296,7 @@ impl Entity {
                 end_date: None,
                 cover_asset_id: None,
                 rating: None,
+                progress: None,
             });
         }
 

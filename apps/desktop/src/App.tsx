@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Sidebar, NavTab } from './components/Sidebar';
 import { Header } from './components/Header';
 import { HomeView } from './components/HomeView';
+import { WorksView } from './components/WorksView';
 import { AssetsView } from './components/AssetsView';
 import { EntitiesView } from './components/EntitiesView';
 import { MemoriesView } from './components/MemoriesView';
@@ -93,6 +94,8 @@ export const App: React.FC = () => {
     switch (currentTab) {
       case 'home':
         return t.nav.home;
+      case 'works':
+        return t.nav.works;
       case 'assets':
         return t.nav.assets;
       case 'entities':
@@ -137,6 +140,12 @@ export const App: React.FC = () => {
                   vaultInfo={vaultInfo}
                   vaultStats={vaultStats}
                   onNavigate={(tab) => setCurrentTab(tab)}
+                />
+              )}
+              {currentTab === 'works' && (
+                <WorksView
+                  assets={assets}
+                  onRefreshAll={loadData}
                 />
               )}
               {currentTab === 'assets' && (

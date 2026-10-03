@@ -439,6 +439,21 @@ impl McpServer {
                 }
             }),
             json!({
+                "name": "update_work_progress",
+                "description": "[MetadataWrite] Update consumption progress for a work entity (episode, chapter, page, or percentage)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "The work/entity ID" },
+                        "position": { "type": "number", "description": "Current position (e.g. 24.0 for episode 24)" },
+                        "position_type": { "type": "string", "description": "Optional position type: episode, chapter, page, minute, percentage, custom" },
+                        "total_positions": { "type": "number", "description": "Optional total positions (e.g. 24.0 episodes)" },
+                        "unit": { "type": "string", "description": "Optional unit display string, e.g. '集', '话', '页'" }
+                    },
+                    "required": ["id", "position"]
+                }
+            }),
+            json!({
                 "name": "create_relation",
                 "description": "[MetadataWrite] Create a relation between two vault items (assets, entities, memories)",
                 "inputSchema": {
@@ -730,6 +745,7 @@ impl McpServer {
                         end_date: args.get("end_date").and_then(|v| v.as_str()).map(|s| s.to_string()),
                         cover_asset_id: None,
                         rating: args.get("rating").and_then(|v| v.as_f64()).map(|f| f as f32),
+                        progress: None,
                     });
                 }
 
@@ -769,6 +785,19 @@ impl McpServer {
                     updated_at: Utc::now(),
                 };
                 self.core.update_entity("mcp", &updated).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())
+            }
+
+            "update_work_progress" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "update_work_progress")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id")?;
+                let position = args.get("position").and_then(|v| v.as_f64()).ok_or("Missing position")?;
+                let p_type = args.get("position_type").and_then(|v| v.as_str()).map(ProgressPositionType::parse);
+                let total = args.get("total_positions").and_then(|v| v.as_f64());
+                let unit = args.get("unit").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                let updated = self.core.update_work_progress("mcp", id, position, p_type, total, unit)
+                    .map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())
             }
 

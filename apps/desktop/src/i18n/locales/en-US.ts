@@ -20,6 +20,7 @@ export const enUS: TranslationType = {
   },
   nav: {
     home: 'Overview',
+    works: 'Works & Media',
     assets: 'Assets',
     entities: 'Entities',
     collections: 'Collections',

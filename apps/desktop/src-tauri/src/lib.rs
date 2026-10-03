@@ -369,6 +369,26 @@ fn update_work_status(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn update_work_progress(
+    id: String,
+    position: f64,
+    position_type: Option<String>,
+    total_positions: Option<f64>,
+    unit: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Entity, String> {
+    let p_type = position_type.map(|s| ProgressPositionType::parse(&s));
+    state.core.update_work_progress("desktop", &id, position, p_type, total_positions, unit)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    tauri_plugin_opener::open_url(&url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 fn resolve_default_vault_path() -> PathBuf {
     if let Some(proj_dirs) = ProjectDirs::from("com", "looma", "Looma") {
         let data_dir = proj_dirs.data_dir();
@@ -441,7 +461,9 @@ pub fn run() {
             list_works,
             get_work_summary,
             create_work,
-            update_work_status
+            update_work_status,
+            update_work_progress,
+            open_external_url
         ])
         .run(tauri::generate_context!())
     {
