@@ -63,3 +63,13 @@ pub struct Asset {
     pub modified_at: DateTime<Utc>,
     pub indexed_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AssetFilter {
+    pub kind: Option<AssetKind>,
+    pub status: Option<AssetStatus>,
+    pub search_query: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+

@@ -1,10 +1,12 @@
 use std::path::PathBuf;
+use base64::Engine;
 use directories::ProjectDirs;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use looma_core::models::*;
 use looma_core::services::*;
 use looma_database::LoomaDb;
+use looma_scanner::{ScanOptions, ScanProgress, ScanSummary, Scanner};
 
 pub struct AppState {
     pub db: LoomaDb,
@@ -25,10 +27,103 @@ fn get_vault_stats(state: State<'_, AppState>) -> Result<VaultStats, String> {
 }
 
 #[tauri::command]
-fn list_assets(limit: Option<usize>, offset: Option<usize>, state: State<'_, AppState>) -> Result<Vec<Asset>, String> {
+fn list_assets(filter: Option<AssetFilter>, state: State<'_, AppState>) -> Result<Vec<Asset>, String> {
     state.db
-        .list_assets(limit.unwrap_or(50), offset.unwrap_or(0))
+        .query_assets(&filter.unwrap_or_default())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_asset(id: String, state: State<'_, AppState>) -> Result<Option<Asset>, String> {
+    state.db.get_asset_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_asset(id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.db.delete_asset(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pick_folder() -> Result<Option<String>, String> {
+    let folder = rfd::FileDialog::new().pick_folder();
+    Ok(folder.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+async fn scan_directory(
+    path: String,
+    compute_hash: Option<bool>,
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ScanSummary, String> {
+    let db = state.db.clone();
+    let root = PathBuf::from(path);
+    let options = ScanOptions {
+        compute_hash: compute_hash.unwrap_or(true),
+        ..Default::default()
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress_cb = move |progress: ScanProgress| {
+            let _ = app_handle.emit("scan-progress", &progress);
+        };
+        Scanner::scan_directory(&db, &root, &options, Some(progress_cb))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_in_file_manager(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = std::process::Command::new("explorer");
+        // Windows explorer /select,"path" opens explorer with the file selected
+        cmd.arg(format!("/select,{}", path));
+        cmd.spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg("-R").arg(&path);
+        cmd.spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let p = std::path::Path::new(&path);
+        let parent = p.parent().unwrap_or(p);
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(parent);
+        cmd.spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn read_asset_preview(path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err("File not found".to_string());
+    }
+    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    if meta.len() > 30 * 1024 * 1024 {
+        return Err("File too large for direct inline preview".to_string());
+    }
+    let bytes = std::fs::read(p).map_err(|e| e.to_string())?;
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
 }
 
 #[tauri::command]
@@ -89,6 +184,12 @@ pub fn run() {
             get_vault_info,
             get_vault_stats,
             list_assets,
+            get_asset,
+            delete_asset,
+            pick_folder,
+            scan_directory,
+            open_in_file_manager,
+            read_asset_preview,
             list_entities,
             create_entity,
             list_memories,

@@ -437,6 +437,195 @@ impl AssetService for LoomaDb {
         Ok(())
     }
 
+    fn query_assets(&self, filter: &AssetFilter) -> LoomaResult<Vec<Asset>> {
+        let conn = self.conn.lock();
+        let mut query = "SELECT id, kind, source, path, size, hash, mime_type, metadata_json, status,
+                                created_at, modified_at, indexed_at
+                         FROM assets WHERE 1=1".to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(ref kind) = filter.kind {
+            let kind_str = serde_json::to_string(kind).unwrap_or_default().trim_matches('"').to_string();
+            query.push_str(" AND kind = ?");
+            params_vec.push(Box::new(kind_str));
+        }
+
+        if let Some(ref status) = filter.status {
+            let status_str = serde_json::to_string(status).unwrap_or_default().trim_matches('"').to_string();
+            query.push_str(" AND status = ?");
+            params_vec.push(Box::new(status_str));
+        }
+
+        if let Some(ref q) = filter.search_query {
+            query.push_str(" AND (path LIKE ? OR metadata_json LIKE ?)");
+            let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+
+        query.push_str(" ORDER BY indexed_at DESC");
+
+        if let Some(limit) = filter.limit {
+            query.push_str(&format!(" LIMIT {}", limit));
+            if let Some(offset) = filter.offset {
+                query.push_str(&format!(" OFFSET {}", offset));
+            }
+        }
+
+        let mut stmt = conn.prepare(&query).map_err(|e| LoomaError::Database(e.to_string()))?;
+        let rusqlite_params: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| &**p).collect();
+
+        let asset_iter = stmt
+            .query_map(&*rusqlite_params, |row| {
+                let kind_str: String = row.get(1)?;
+                let source_str: String = row.get(2)?;
+                let meta_str: String = row.get(7)?;
+                let status_str: String = row.get(8)?;
+                let created_str: String = row.get(9)?;
+                let mod_str: String = row.get(10)?;
+                let idx_str: String = row.get(11)?;
+
+                Ok((
+                    row.get::<_, String>(0)?,
+                    kind_str,
+                    source_str,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?.map(|s| s as u64),
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    meta_str,
+                    status_str,
+                    created_str,
+                    mod_str,
+                    idx_str,
+                ))
+            })
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut results = Vec::new();
+        for item in asset_iter {
+            let (id, kind_str, source_str, path, size, hash, mime, meta_str, status_str, c_str, m_str, i_str) =
+                item.map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let kind = serde_json::from_str(&format!("\"{}\"", kind_str)).unwrap_or_default();
+            let source = serde_json::from_str(&format!("\"{}\"", source_str)).unwrap_or_default();
+            let status = serde_json::from_str(&format!("\"{}\"", status_str)).unwrap_or_default();
+            let metadata = serde_json::from_str(&meta_str).unwrap_or(Value::Object(Default::default()));
+
+            let created_at = DateTime::parse_from_rfc3339(&c_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let modified_at = DateTime::parse_from_rfc3339(&m_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let indexed_at = DateTime::parse_from_rfc3339(&i_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            results.push(Asset {
+                id,
+                kind,
+                source,
+                path,
+                size,
+                hash,
+                mime_type: mime,
+                metadata,
+                status,
+                created_at,
+                modified_at,
+                indexed_at,
+            });
+        }
+
+        Ok(results)
+    }
+
+    fn list_assets_by_prefix(&self, prefix: &str) -> LoomaResult<Vec<Asset>> {
+        let conn = self.conn.lock();
+        let pattern = format!("{}%", prefix);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, kind, source, path, size, hash, mime_type, metadata_json, status,
+                        created_at, modified_at, indexed_at
+                 FROM assets WHERE path LIKE ?1",
+            )
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let asset_iter = stmt
+            .query_map(params![pattern], |row| {
+                let kind_str: String = row.get(1)?;
+                let source_str: String = row.get(2)?;
+                let meta_str: String = row.get(7)?;
+                let status_str: String = row.get(8)?;
+                let created_str: String = row.get(9)?;
+                let mod_str: String = row.get(10)?;
+                let idx_str: String = row.get(11)?;
+
+                Ok((
+                    row.get::<_, String>(0)?,
+                    kind_str,
+                    source_str,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?.map(|s| s as u64),
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    meta_str,
+                    status_str,
+                    created_str,
+                    mod_str,
+                    idx_str,
+                ))
+            })
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut results = Vec::new();
+        for item in asset_iter {
+            let (id, kind_str, source_str, path, size, hash, mime, meta_str, status_str, c_str, m_str, i_str) =
+                item.map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let kind = serde_json::from_str(&format!("\"{}\"", kind_str)).unwrap_or_default();
+            let source = serde_json::from_str(&format!("\"{}\"", source_str)).unwrap_or_default();
+            let status = serde_json::from_str(&format!("\"{}\"", status_str)).unwrap_or_default();
+            let metadata = serde_json::from_str(&meta_str).unwrap_or(Value::Object(Default::default()));
+
+            let created_at = DateTime::parse_from_rfc3339(&c_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let modified_at = DateTime::parse_from_rfc3339(&m_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let indexed_at = DateTime::parse_from_rfc3339(&i_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            results.push(Asset {
+                id,
+                kind,
+                source,
+                path,
+                size,
+                hash,
+                mime_type: mime,
+                metadata,
+                status,
+                created_at,
+                modified_at,
+                indexed_at,
+            });
+        }
+
+        Ok(results)
+    }
+
+    fn delete_asset(&self, id: &str) -> LoomaResult<bool> {
+        let conn = self.conn.lock();
+        let rows = conn
+            .execute("DELETE FROM assets WHERE id = ?1", params![id])
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(rows > 0)
+    }
+
     fn count_assets(&self) -> LoomaResult<u64> {
         let conn = self.conn.lock();
         let count: i64 = conn

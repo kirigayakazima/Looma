@@ -1,6 +1,6 @@
 use crate::error::LoomaResult;
 use crate::models::{
-    Asset, Collection, Entity, EntityFilter, Memory, Relation,
+    Asset, AssetFilter, Collection, Entity, EntityFilter, Memory, Relation,
     VaultInfo, VaultStats,
 };
 
@@ -11,9 +11,12 @@ pub trait VaultService: Send + Sync {
 
 pub trait AssetService: Send + Sync {
     fn list_assets(&self, limit: usize, offset: usize) -> LoomaResult<Vec<Asset>>;
+    fn query_assets(&self, filter: &AssetFilter) -> LoomaResult<Vec<Asset>>;
     fn get_asset_by_id(&self, id: &str) -> LoomaResult<Option<Asset>>;
     fn get_asset_by_path(&self, path: &str) -> LoomaResult<Option<Asset>>;
+    fn list_assets_by_prefix(&self, prefix: &str) -> LoomaResult<Vec<Asset>>;
     fn upsert_asset(&self, asset: &Asset) -> LoomaResult<()>;
+    fn delete_asset(&self, id: &str) -> LoomaResult<bool>;
     fn count_assets(&self) -> LoomaResult<u64>;
 }
 

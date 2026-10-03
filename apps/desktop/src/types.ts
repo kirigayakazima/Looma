@@ -35,6 +35,33 @@ export interface Asset {
   indexed_at: string;
 }
 
+export interface AssetFilter {
+  kind?: AssetKind;
+  status?: AssetStatus;
+  search_query?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ScanProgress {
+  total_discovered: number;
+  new_assets: number;
+  modified_assets: number;
+  unchanged_assets: number;
+  current_file: string | null;
+}
+
+export interface ScanSummary {
+  root_path: string;
+  duration_ms: number;
+  total_scanned: number;
+  new_assets: number;
+  modified_assets: number;
+  unchanged_assets: number;
+  missing_assets: number;
+  errors: string[];
+}
+
 export interface Entity {
   id: string;
   entity_type: string;
