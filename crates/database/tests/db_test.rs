@@ -118,7 +118,18 @@ fn test_in_memory_db_and_services() {
     assert_eq!(db.list_collections().expect("list collections failed").len(), 0);
     assert_eq!(db.list_items_for_collection("col-1").unwrap().len(), 0);
 
-    // 7. Entity Update & Delete
+    // 7. Timeline Service
+    let tl_all = db.query_timeline(&TimelineFilter::default()).expect("query timeline failed");
+    assert!(!tl_all.is_empty());
+    // Filter specifically for asset
+    let tl_asset = db.query_timeline(&TimelineFilter {
+        item_types: Some(vec!["asset".to_string()]),
+        ..Default::default()
+    }).expect("query asset timeline failed");
+    assert_eq!(tl_asset.len(), 1);
+    assert_eq!(tl_asset[0].item_type, "asset");
+
+    // 8. Entity Update & Delete
     let mut updated_entity = fetched;
     updated_entity.title = "BLEACH: Thousand-Year Blood War".to_string();
     db.update_entity(&updated_entity).expect("update entity failed");

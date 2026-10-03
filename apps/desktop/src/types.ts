@@ -111,3 +111,19 @@ export interface CollectionItem {
   position: number;
   added_at: string;
 }
+
+export interface TimelineItem {
+  id: string;
+  item_type: 'asset' | 'entity' | 'memory';
+  timestamp: string;
+  title: string;
+  description: string | null;
+  badge: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface TimelineFilter {
+  item_types?: string[];
+  limit?: number;
+  offset?: number;
+}

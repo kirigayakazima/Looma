@@ -51,7 +51,7 @@ export const zhCN = {
     databaseEngineDesc: 'SQLite (WAL模式 + FTS5 全文检索)',
     databaseSize: '数据库大小',
     archPhase: '架构研发阶段',
-    archPhaseVal: 'Phase 2 — 实体与关系系统已就绪',
+    archPhaseVal: 'Phase 3 — 时光轴与记忆织网系统已就绪',
   },
   assets: {
     title: '数字资产浏览器',

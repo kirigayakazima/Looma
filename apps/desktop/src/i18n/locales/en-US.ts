@@ -53,7 +53,7 @@ export const enUS: TranslationType = {
     databaseEngineDesc: 'SQLite (WAL Mode + FTS5 Full-Text Search)',
     databaseSize: 'Database Size',
     archPhase: 'Architecture Phase',
-    archPhaseVal: 'Phase 2 — Entities & Relations Ready',
+    archPhaseVal: 'Phase 3 — Timeline & Memory Weaving Ready',
   },
   assets: {
     title: 'Asset Browser',

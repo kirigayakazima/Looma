@@ -1,7 +1,7 @@
 use crate::error::LoomaResult;
 use crate::models::{
     Asset, AssetFilter, Collection, CollectionItem, Entity, EntityFilter, Memory, Relation,
-    VaultInfo, VaultStats,
+    TimelineFilter, TimelineItem, VaultInfo, VaultStats,
 };
 
 pub trait VaultService: Send + Sync {
@@ -54,4 +54,8 @@ pub trait CollectionService: Send + Sync {
     fn list_items_for_collection(&self, collection_id: &str) -> LoomaResult<Vec<CollectionItem>>;
     fn add_item_to_collection(&self, collection_id: &str, item_id: &str, item_type: &str) -> LoomaResult<()>;
     fn remove_item_from_collection(&self, collection_id: &str, item_id: &str) -> LoomaResult<bool>;
+}
+
+pub trait TimelineService: Send + Sync {
+    fn query_timeline(&self, filter: &TimelineFilter) -> LoomaResult<Vec<TimelineItem>>;
 }

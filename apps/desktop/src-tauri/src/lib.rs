@@ -230,6 +230,13 @@ fn remove_item_from_collection(collection_id: String, item_id: String, state: St
     state.db.remove_item_from_collection(&collection_id, &item_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn query_timeline(filter: Option<TimelineFilter>, state: State<'_, AppState>) -> Result<Vec<TimelineItem>, String> {
+    state.db
+        .query_timeline(&filter.unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
 fn resolve_default_vault_path() -> PathBuf {
     if let Some(proj_dirs) = ProjectDirs::from("com", "looma", "Looma") {
         let data_dir = proj_dirs.data_dir();
@@ -284,7 +291,8 @@ pub fn run() {
             delete_collection,
             list_collection_items,
             add_item_to_collection,
-            remove_item_from_collection
+            remove_item_from_collection,
+            query_timeline
         ])
         .run(tauri::generate_context!())
     {

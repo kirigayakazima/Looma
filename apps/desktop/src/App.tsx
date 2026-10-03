@@ -7,6 +7,7 @@ import { AssetsView } from './components/AssetsView';
 import { EntitiesView } from './components/EntitiesView';
 import { MemoriesView } from './components/MemoriesView';
 import { CollectionsView } from './components/CollectionsView';
+import { TimelineView } from './components/TimelineView';
 import { SettingsView } from './components/SettingsView';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { VaultInfo, VaultStats, Asset, Entity, Memory, Collection } from './types';
@@ -142,7 +143,12 @@ export const App: React.FC = () => {
                 <EntitiesView entities={entities} assets={assets} onRefresh={loadData} />
               )}
               {currentTab === 'memories' && (
-                <MemoriesView memories={memories} onRefresh={loadData} />
+                <MemoriesView
+                  memories={memories}
+                  entities={entities}
+                  assets={assets}
+                  onRefresh={loadData}
+                />
               )}
               {currentTab === 'collections' && (
                 <CollectionsView
@@ -153,12 +159,13 @@ export const App: React.FC = () => {
                 />
               )}
               {currentTab === 'timeline' && (
-                <div className="p-12 rounded-xl bg-neutral-900 border border-neutral-800 text-center space-y-2 max-w-xl">
-                  <h4 className="text-sm font-medium text-neutral-300">{t.timeline.title}</h4>
-                  <p className="text-xs text-neutral-500">
-                    {t.timeline.desc}
-                  </p>
-                </div>
+                <TimelineView
+                  assets={assets}
+                  entities={entities}
+                  memories={memories}
+                  onRefresh={loadData}
+                  onNavigateTab={(tab) => setCurrentTab(tab)}
+                />
               )}
               {currentTab === 'settings' && (
                 <SettingsView vaultInfo={vaultInfo} />

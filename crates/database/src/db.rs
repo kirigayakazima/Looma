@@ -1303,3 +1303,152 @@ impl CollectionService for LoomaDb {
         Ok(rows > 0)
     }
 }
+
+impl TimelineService for LoomaDb {
+    fn query_timeline(&self, filter: &TimelineFilter) -> LoomaResult<Vec<TimelineItem>> {
+        let conn = self.conn.lock();
+        let types = filter.item_types.as_deref().unwrap_or(&[]);
+        let include_all = types.is_empty() || types.iter().any(|t| t == "all");
+
+        let mut items = Vec::new();
+
+        if include_all || types.iter().any(|t| t == "asset") {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, 'asset', modified_at, COALESCE(path, id), mime_type, kind, metadata_json
+                     FROM assets WHERE status = 'active'",
+                )
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let asset_iter = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let item_type: String = row.get(1)?;
+                    let time_str: String = row.get(2)?;
+                    let title: String = row.get(3)?;
+                    let desc: Option<String> = row.get(4)?;
+                    let badge: Option<String> = row.get(5)?;
+                    let meta_str: String = row.get(6)?;
+                    Ok((id, item_type, time_str, title, desc, badge, meta_str))
+                })
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for row in asset_iter {
+                let (id, item_type, time_str, title, desc, badge, meta_str) =
+                    row.map_err(|e| LoomaError::Database(e.to_string()))?;
+                let timestamp = DateTime::parse_from_rfc3339(&time_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let metadata = serde_json::from_str(&meta_str).unwrap_or(Value::Object(Default::default()));
+                items.push(TimelineItem {
+                    id,
+                    item_type,
+                    timestamp,
+                    title,
+                    description: desc,
+                    badge,
+                    metadata,
+                });
+            }
+        }
+
+        if include_all || types.iter().any(|t| t == "entity") {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, 'entity', created_at, title, description, entity_type, properties_json
+                     FROM entities",
+                )
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let entity_iter = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let item_type: String = row.get(1)?;
+                    let time_str: String = row.get(2)?;
+                    let title: String = row.get(3)?;
+                    let desc: Option<String> = row.get(4)?;
+                    let badge: Option<String> = row.get(5)?;
+                    let meta_str: String = row.get(6)?;
+                    Ok((id, item_type, time_str, title, desc, badge, meta_str))
+                })
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for row in entity_iter {
+                let (id, item_type, time_str, title, desc, badge, meta_str) =
+                    row.map_err(|e| LoomaError::Database(e.to_string()))?;
+                let timestamp = DateTime::parse_from_rfc3339(&time_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let metadata = serde_json::from_str(&meta_str).unwrap_or(Value::Object(Default::default()));
+                items.push(TimelineItem {
+                    id,
+                    item_type,
+                    timestamp,
+                    title,
+                    description: desc,
+                    badge,
+                    metadata,
+                });
+            }
+        }
+
+        if include_all || types.iter().any(|t| t == "memory") {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, 'memory', recorded_at, title, content, category, metadata_json
+                     FROM memories",
+                )
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let mem_iter = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let item_type: String = row.get(1)?;
+                    let time_str: String = row.get(2)?;
+                    let title: String = row.get(3)?;
+                    let desc: Option<String> = row.get(4)?;
+                    let badge: Option<String> = row.get(5)?;
+                    let meta_str: String = row.get(6)?;
+                    Ok((id, item_type, time_str, title, desc, badge, meta_str))
+                })
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for row in mem_iter {
+                let (id, item_type, time_str, title, desc, badge, meta_str) =
+                    row.map_err(|e| LoomaError::Database(e.to_string()))?;
+                let timestamp = DateTime::parse_from_rfc3339(&time_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let metadata = serde_json::from_str(&meta_str).unwrap_or(Value::Object(Default::default()));
+                items.push(TimelineItem {
+                    id,
+                    item_type,
+                    timestamp,
+                    title,
+                    description: desc,
+                    badge,
+                    metadata,
+                });
+            }
+        }
+
+        // Sort chronologically descending
+        items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        // Apply pagination
+        let offset = filter.offset.unwrap_or(0);
+        let items: Vec<TimelineItem> = if offset < items.len() {
+            items.into_iter().skip(offset).collect()
+        } else {
+            Vec::new()
+        };
+
+        let items: Vec<TimelineItem> = if let Some(limit) = filter.limit {
+            items.into_iter().take(limit).collect()
+        } else {
+            items
+        };
+
+        Ok(items)
+    }
+}

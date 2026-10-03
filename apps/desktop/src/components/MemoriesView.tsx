@@ -1,15 +1,35 @@
-import React, { useState, useMemo } from 'react';
-import { Memory } from '../types';
-import { BookOpen, Plus, Calendar, Pencil, Trash2, Search, Tag, X } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { Memory, Entity, Asset, Relation } from '../types';
+import {
+  BookOpen,
+  Plus,
+  Calendar,
+  Pencil,
+  Trash2,
+  Search,
+  Tag,
+  X,
+  Layers,
+  FileText,
+  Link2,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import { invoke } from '@tauri-apps/api/core';
+import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface MemoriesViewProps {
   memories: Memory[];
+  entities: Entity[];
+  assets: Asset[];
   onRefresh: () => Promise<void>;
 }
 
-export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh }) => {
+export const MemoriesView: React.FC<MemoriesViewProps> = ({
+  memories,
+  entities,
+  assets,
+  onRefresh,
+}) => {
   const { t } = useI18n();
 
   // Create modal state
@@ -17,6 +37,7 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState('journal');
   const [content, setContent] = useState('');
+  const [selectedEntityId, setSelectedEntityId] = useState<string>('');
   const [loading, setLoading] = useState(false);
 
   // Edit modal state
@@ -30,6 +51,10 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
 
+  // Relations map: memoryId -> Relation[]
+  const [relationsMap, setRelationsMap] = useState<Record<string, Relation[]>>({});
+  const [activeLinkDropdown, setActiveLinkDropdown] = useState<string | null>(null);
+
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
     try {
       return await invoke<T>(cmd, args);
@@ -38,6 +63,22 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
       return null;
     }
   };
+
+  // Load relations for all visible memories
+  const loadAllRelations = useCallback(async () => {
+    const map: Record<string, Relation[]> = {};
+    for (const mem of memories) {
+      const rels = await safeInvoke<Relation[]>('list_relations_for_item', { itemId: mem.id });
+      if (rels) {
+        map[mem.id] = rels;
+      }
+    }
+    setRelationsMap(map);
+  }, [memories]);
+
+  useEffect(() => {
+    loadAllRelations();
+  }, [loadAllRelations]);
 
   // Distinct categories
   const categories = useMemo(() => {
@@ -72,8 +113,9 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
     if (!title.trim() || !content.trim()) return;
     setLoading(true);
     try {
+      const memoryId = 'mem_' + Math.random().toString(36).substring(2, 9);
       const memory: Memory = {
-        id: 'mem_' + Math.random().toString(36).substring(2, 9),
+        id: memoryId,
         title: title.trim(),
         content: content.trim(),
         category: category.trim() || null,
@@ -83,8 +125,25 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
         updated_at: new Date().toISOString(),
       };
       await safeInvoke('create_memory', { memory });
+
+      // If an entity was selected to link at creation time
+      if (selectedEntityId) {
+        const rel: Relation = {
+          id: 'rel_' + Math.random().toString(36).substring(2, 9),
+          source_id: memoryId,
+          source_type: 'memory',
+          relation_type: 'refers_to',
+          target_id: selectedEntityId,
+          target_type: 'entity',
+          metadata: {},
+          created_at: new Date().toISOString(),
+        };
+        await safeInvoke('create_relation', { relation: rel });
+      }
+
       setTitle('');
       setContent('');
+      setSelectedEntityId('');
       setShowCreateModal(false);
       await onRefresh();
     } catch (err) {
@@ -128,6 +187,27 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
     if (!window.confirm(t.memories.deleteConfirm)) return;
     await safeInvoke('delete_memory', { id });
     await onRefresh();
+  };
+
+  const handleLinkItem = async (memoryId: string, targetId: string, targetType: string) => {
+    const rel: Relation = {
+      id: 'rel_' + Math.random().toString(36).substring(2, 9),
+      source_id: memoryId,
+      source_type: 'memory',
+      relation_type: targetType === 'entity' ? 'refers_to' : 'attaches',
+      target_id: targetId,
+      target_type: targetType,
+      metadata: {},
+      created_at: new Date().toISOString(),
+    };
+    await safeInvoke('create_relation', { relation: rel });
+    setActiveLinkDropdown(null);
+    await loadAllRelations();
+  };
+
+  const handleUnlink = async (memoryId: string, targetId: string) => {
+    await safeInvoke('delete_relation_between', { sourceId: memoryId, targetId });
+    await loadAllRelations();
   };
 
   return (
@@ -184,7 +264,7 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
               className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap transition-colors ${
                 selectedCategory === cat
                   ? 'bg-amber-600/20 text-amber-300 border border-amber-500/30 font-medium'
-                  : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border border-neutral-700/50'
+                : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border border-neutral-700/50'
               }`}
             >
               {cat}
@@ -206,7 +286,7 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
             </button>
           </div>
           <form onSubmit={handleCreateSubmit} className="space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
                 <label className="block text-[11px] font-medium text-neutral-400 mb-1">{t.memories.titleLabel}</label>
                 <input
@@ -228,11 +308,26 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
                   className="w-full bg-neutral-800 border border-neutral-700 rounded px-2.5 py-1.5 text-xs text-neutral-100 focus:outline-none focus:border-amber-500"
                 />
               </div>
+              <div>
+                <label className="block text-[11px] font-medium text-neutral-400 mb-1">关联实体概念 (选填)</label>
+                <select
+                  value={selectedEntityId}
+                  onChange={(e) => setSelectedEntityId(e.target.value)}
+                  className="w-full bg-neutral-800 border border-neutral-700 rounded px-2.5 py-1.5 text-xs text-neutral-100 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="">-- 无关联 --</option>
+                  {entities.map((ent) => (
+                    <option key={ent.id} value={ent.id}>
+                      {ent.title} ({ent.entity_type})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
             <div>
-              <label className="block text-[11px] font-medium text-neutral-400 mb-1">{t.memories.contentLabel}</label>
+              <label className="block text-[11px] font-medium text-neutral-400 mb-1">{t.memories.contentLabel} (支持标准 Markdown 语法)</label>
               <textarea
-                rows={5}
+                rows={6}
                 required
                 placeholder={t.memories.contentPlaceholder}
                 value={content}
@@ -295,9 +390,9 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
               </div>
             </div>
             <div>
-              <label className="block text-[11px] font-medium text-neutral-400 mb-1">{t.memories.contentLabel}</label>
+              <label className="block text-[11px] font-medium text-neutral-400 mb-1">{t.memories.contentLabel} (Markdown)</label>
               <textarea
-                rows={5}
+                rows={6}
                 required
                 value={editContent}
                 onChange={(e) => setEditContent(e.target.value)}
@@ -334,53 +429,172 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({ memories, onRefresh 
           </p>
         </div>
       ) : (
-        <div className="space-y-3">
-          {filteredMemories.map((mem) => (
-            <div
-              key={mem.id}
-              className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 hover:border-neutral-700 transition-colors group"
-            >
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center space-x-2">
-                  <span className="text-xs font-semibold text-neutral-200">{mem.title}</span>
-                  {mem.category && (
-                    <span className="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 font-mono border border-amber-500/20">
-                      <Tag className="w-2.5 h-2.5" />
-                      <span>{mem.category}</span>
-                    </span>
-                  )}
-                </div>
+        <div className="space-y-4">
+          {filteredMemories.map((mem) => {
+            const rels = relationsMap[mem.id] || [];
+            const linkedEntityIds = rels
+              .map((r) => (r.source_id === mem.id ? r.target_id : r.source_id));
+            const linkedEntitiesList = entities.filter((e) => linkedEntityIds.includes(e.id));
+            const linkedAssetsList = assets.filter((a) => linkedEntityIds.includes(a.id));
 
-                <div className="flex items-center space-x-3">
-                  <div className="flex items-center space-x-1 text-[11px] text-neutral-500">
-                    <Calendar className="w-3 h-3" />
-                    <span>{new Date(mem.recorded_at).toLocaleDateString()}</span>
+            return (
+              <div
+                key={mem.id}
+                className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 hover:border-neutral-700/80 transition-all group"
+              >
+                <div className="flex items-center justify-between mb-3 border-b border-neutral-800/60 pb-2.5">
+                  <div className="flex items-center space-x-2.5">
+                    <span className="text-sm font-semibold text-neutral-100">{mem.title}</span>
+                    {mem.category && (
+                      <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 font-mono border border-amber-500/20">
+                        <Tag className="w-2.5 h-2.5" />
+                        <span>{mem.category}</span>
+                      </span>
+                    )}
                   </div>
 
-                  {/* Actions */}
-                  <div className="flex items-center space-x-1 opacity-70 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={() => handleOpenEdit(mem)}
-                      className="p-1 rounded hover:bg-neutral-800 text-neutral-400 hover:text-amber-400 transition-colors"
-                      title={t.memories.editBtn}
+                  <div className="flex items-center space-x-3">
+                    <div className="flex items-center space-x-1 text-[11px] text-neutral-500">
+                      <Calendar className="w-3 h-3" />
+                      <span>{new Date(mem.recorded_at).toLocaleDateString()}</span>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center space-x-1 opacity-70 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={() => handleOpenEdit(mem)}
+                        className="p-1 rounded hover:bg-neutral-800 text-neutral-400 hover:text-amber-400 transition-colors"
+                        title={t.memories.editBtn}
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={(e) => handleDelete(mem.id, e)}
+                        className="p-1 rounded hover:bg-neutral-800 text-neutral-400 hover:text-rose-400 transition-colors"
+                        title={t.memories.deleteBtn}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Markdown Rendered Content */}
+                <div className="py-1">
+                  <MarkdownRenderer content={mem.content} />
+                </div>
+
+                {/* Linked Entities & Assets badges */}
+                <div className="mt-4 pt-3 border-t border-neutral-800/60 flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-neutral-500 flex items-center space-x-1">
+                    <Link2 className="w-3 h-3" />
+                    <span>已关联概念与资产:</span>
+                  </span>
+
+                  {linkedEntitiesList.map((ent) => (
+                    <span
+                      key={ent.id}
+                      className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[11px] bg-indigo-500/10 text-indigo-300 border border-indigo-500/20"
                     >
-                      <Pencil className="w-3.5 h-3.5" />
-                    </button>
+                      <Layers className="w-2.5 h-2.5" />
+                      <span>{ent.title}</span>
+                      <button
+                        onClick={() => handleUnlink(mem.id, ent.id)}
+                        className="hover:text-rose-400 ml-0.5"
+                        title="解除关联"
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
+                    </span>
+                  ))}
+
+                  {linkedAssetsList.map((ast) => {
+                    const fname = (ast.path || ast.id).split(/[\\/]/).pop() || ast.id;
+                    return (
+                      <span
+                        key={ast.id}
+                        className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[11px] bg-sky-500/10 text-sky-300 border border-sky-500/20"
+                      >
+                        <FileText className="w-2.5 h-2.5" />
+                        <span className="max-w-[140px] truncate">{fname}</span>
+                        <button
+                          onClick={() => handleUnlink(mem.id, ast.id)}
+                          className="hover:text-rose-400 ml-0.5"
+                          title="解除关联"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </span>
+                    );
+                  })}
+
+                  {/* Add link dropdown toggle */}
+                  <div className="relative">
                     <button
-                      onClick={(e) => handleDelete(mem.id, e)}
-                      className="p-1 rounded hover:bg-neutral-800 text-neutral-400 hover:text-rose-400 transition-colors"
-                      title={t.memories.deleteBtn}
+                      onClick={() =>
+                        setActiveLinkDropdown(activeLinkDropdown === mem.id ? null : mem.id)
+                      }
+                      className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-[11px] bg-neutral-800 hover:bg-neutral-750 text-neutral-400 hover:text-neutral-200 border border-neutral-700/60 transition-colors"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Plus className="w-2.5 h-2.5" />
+                      <span>关联</span>
                     </button>
+
+                    {activeLinkDropdown === mem.id && (
+                      <div className="absolute left-0 top-full mt-1.5 z-30 w-56 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl p-2 space-y-2 text-xs">
+                        <div>
+                          <p className="text-[10px] font-semibold text-neutral-400 mb-1 px-1">关联实体概念</p>
+                          <div className="max-h-32 overflow-y-auto space-y-1">
+                            {entities.length === 0 ? (
+                              <p className="text-[10px] text-neutral-500 px-1">暂无实体</p>
+                            ) : (
+                              entities
+                                .filter((e) => !linkedEntityIds.includes(e.id))
+                                .map((e) => (
+                                  <button
+                                    key={e.id}
+                                    onClick={() => handleLinkItem(mem.id, e.id, 'entity')}
+                                    className="w-full text-left px-2 py-1 rounded hover:bg-neutral-800 text-neutral-200 flex items-center justify-between text-xs"
+                                  >
+                                    <span className="truncate">{e.title}</span>
+                                    <span className="text-[9px] text-neutral-500">{e.entity_type}</span>
+                                  </button>
+                                ))
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="border-t border-neutral-800 pt-1.5">
+                          <p className="text-[10px] font-semibold text-neutral-400 mb-1 px-1">关联数字资产</p>
+                          <div className="max-h-32 overflow-y-auto space-y-1">
+                            {assets.length === 0 ? (
+                              <p className="text-[10px] text-neutral-500 px-1">暂无资产</p>
+                            ) : (
+                              assets
+                                .filter((a) => !linkedEntityIds.includes(a.id))
+                                .slice(0, 15)
+                                .map((a) => {
+                                  const name = (a.path || a.id).split(/[\\/]/).pop() || a.id;
+                                  return (
+                                    <button
+                                      key={a.id}
+                                      onClick={() => handleLinkItem(mem.id, a.id, 'asset')}
+                                      className="w-full text-left px-2 py-1 rounded hover:bg-neutral-800 text-neutral-200 truncate text-xs"
+                                    >
+                                      {name}
+                                    </button>
+                                  );
+                                })
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
-              <p className="text-xs text-neutral-300/90 whitespace-pre-wrap font-sans leading-relaxed">
-                {mem.content}
-              </p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
