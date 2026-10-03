@@ -1,0 +1,25 @@
+[package]
+name = "looma-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Looma CLI - Terminal interface for the Looma local-first digital vault"
+
+[[bin]]
+name = "looma"
+path = "src/main.rs"
+
+[dependencies]
+looma-core.workspace = true
+looma-database.workspace = true
+looma-scanner.workspace = true
+looma-mcp.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+directories.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

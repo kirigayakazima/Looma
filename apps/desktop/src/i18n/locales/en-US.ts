@@ -239,5 +239,11 @@ export const enUS: TranslationType = {
     doctorMissing: 'Missing or moved files:',
     doctorMissingNone: 'All indexed file paths are healthy and reachable',
     doctorDbSize: 'Database Disk Size:',
+    interfacesTitle: 'External Interfaces & AI Agent Ecosystem (Phase 5: CLI & MCP)',
+    interfacesDesc: 'Looma provides a native CLI tool and a standard Model Context Protocol (MCP) server over stdio, enabling programmatic terminal integration and seamless cooperation with AI agents (Claude Desktop, Cursor, Antigravity, VS Code, etc.).',
+    cliLabel: 'Looma CLI Tool',
+    cliCmd: 'looma status | scan | search | timeline | doctor',
+    mcpLabel: 'Looma MCP Server (Stdio JSON-RPC)',
+    mcpCmd: 'looma mcp  (or standalone: looma-mcp)',
   },
 };

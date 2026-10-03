@@ -237,6 +237,12 @@ export const zhCN = {
     doctorMissing: '检测到丢失/移走文件：',
     doctorMissingNone: '全部索引文件路径均正常有效',
     doctorDbSize: '数据库磁盘占用：',
+    interfacesTitle: '外部接入与 AI 生态接口 (Phase 5: CLI & MCP)',
+    interfacesDesc: 'Looma 提供了原生 CLI 命令行工具与标准 MCP (Model Context Protocol) 服务端，支持终端快捷操作与各类 AI Agent（如 Claude Desktop, Cursor, Antigravity, VS Code 等）无缝联动。',
+    cliLabel: 'Looma CLI 命令行工具',
+    cliCmd: 'looma status | scan | search | timeline | doctor',
+    mcpLabel: 'Looma MCP 服务端 (Stdio JSON-RPC)',
+    mcpCmd: 'looma mcp  (或独立命令: looma-mcp)',
   },
 };
 
