@@ -134,8 +134,43 @@ fn list_entities(filter: Option<EntityFilter>, state: State<'_, AppState>) -> Re
 }
 
 #[tauri::command]
+fn get_entity(id: String, state: State<'_, AppState>) -> Result<Option<Entity>, String> {
+    state.db.get_entity_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn create_entity(entity: Entity, state: State<'_, AppState>) -> Result<(), String> {
     state.db.create_entity(&entity).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_entity(entity: Entity, state: State<'_, AppState>) -> Result<(), String> {
+    state.db.update_entity(&entity).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_entity(id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.db.delete_entity(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_relation(relation: Relation, state: State<'_, AppState>) -> Result<(), String> {
+    state.db.create_relation(&relation).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_relation(id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.db.delete_relation(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_relation_between(source_id: String, target_id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.db.delete_relation_between(&source_id, &target_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_relations_for_item(item_id: String, state: State<'_, AppState>) -> Result<Vec<Relation>, String> {
+    state.db.list_relations_for_item(&item_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -153,6 +188,36 @@ fn create_memory(memory: Memory, state: State<'_, AppState>) -> Result<(), Strin
 #[tauri::command]
 fn list_collections(state: State<'_, AppState>) -> Result<Vec<Collection>, String> {
     state.db.list_collections().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_collection(id: String, state: State<'_, AppState>) -> Result<Option<Collection>, String> {
+    state.db.get_collection_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_collection(collection: Collection, state: State<'_, AppState>) -> Result<(), String> {
+    state.db.create_collection(&collection).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_collection(id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.db.delete_collection(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_collection_items(collection_id: String, state: State<'_, AppState>) -> Result<Vec<CollectionItem>, String> {
+    state.db.list_items_for_collection(&collection_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_item_to_collection(collection_id: String, item_id: String, item_type: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.db.add_item_to_collection(&collection_id, &item_id, &item_type).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_item_from_collection(collection_id: String, item_id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.db.remove_item_from_collection(&collection_id, &item_id).map_err(|e| e.to_string())
 }
 
 fn resolve_default_vault_path() -> PathBuf {
@@ -191,10 +256,23 @@ pub fn run() {
             open_in_file_manager,
             read_asset_preview,
             list_entities,
+            get_entity,
             create_entity,
+            update_entity,
+            delete_entity,
+            create_relation,
+            delete_relation,
+            delete_relation_between,
+            list_relations_for_item,
             list_memories,
             create_memory,
-            list_collections
+            list_collections,
+            get_collection,
+            create_collection,
+            delete_collection,
+            list_collection_items,
+            add_item_to_collection,
+            remove_item_from_collection
         ])
         .run(tauri::generate_context!())
     {

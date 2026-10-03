@@ -893,6 +893,49 @@ impl RelationService for LoomaDb {
         Ok(results)
     }
 
+    fn list_relations_for_item(&self, item_id: &str) -> LoomaResult<Vec<Relation>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at FROM relations WHERE source_id = ?1 OR target_id = ?1")
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let rel_iter = stmt
+            .query_map(params![item_id], |row| {
+                let id: String = row.get(0)?;
+                let s_id: String = row.get(1)?;
+                let s_type: String = row.get(2)?;
+                let r_type: String = row.get(3)?;
+                let t_id: String = row.get(4)?;
+                let t_type: String = row.get(5)?;
+                let meta_str: String = row.get(6)?;
+                let c_str: String = row.get(7)?;
+                Ok((id, s_id, s_type, r_type, t_id, t_type, meta_str, c_str))
+            })
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut results = Vec::new();
+        for item in rel_iter {
+            let (id, source_id, source_type, relation_type, target_id, target_type, meta_str, c_str) =
+                item.map_err(|e| LoomaError::Database(e.to_string()))?;
+            let metadata = serde_json::from_str(&meta_str).unwrap_or(Value::Object(Default::default()));
+            let created_at = DateTime::parse_from_rfc3339(&c_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            results.push(Relation {
+                id,
+                source_id,
+                source_type,
+                relation_type,
+                target_id,
+                target_type,
+                metadata,
+                created_at,
+            });
+        }
+        Ok(results)
+    }
+
     fn create_relation(&self, relation: &Relation) -> LoomaResult<()> {
         let conn = self.conn.lock();
         let meta_str = serde_json::to_string(&relation.metadata).unwrap_or_else(|_| "{}".to_string());
@@ -918,6 +961,17 @@ impl RelationService for LoomaDb {
         let conn = self.conn.lock();
         let rows = conn
             .execute("DELETE FROM relations WHERE id = ?1", params![id])
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(rows > 0)
+    }
+
+    fn delete_relation_between(&self, source_id: &str, target_id: &str) -> LoomaResult<bool> {
+        let conn = self.conn.lock();
+        let rows = conn
+            .execute(
+                "DELETE FROM relations WHERE (source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1)",
+                params![source_id, target_id],
+            )
             .map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(rows > 0)
     }
@@ -1192,6 +1246,50 @@ impl CollectionService for LoomaDb {
         )
         .map_err(|e| LoomaError::Database(format!("Failed to add item to collection: {e}")))?;
         Ok(())
+    }
+
+    fn delete_collection(&self, id: &str) -> LoomaResult<bool> {
+        let conn = self.conn.lock();
+        let rows = conn
+            .execute("DELETE FROM collections WHERE id = ?1", params![id])
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(rows > 0)
+    }
+
+    fn list_items_for_collection(&self, collection_id: &str) -> LoomaResult<Vec<CollectionItem>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT collection_id, item_id, item_type, position, added_at FROM collection_items WHERE collection_id = ?1 ORDER BY position ASC, added_at DESC")
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let item_iter = stmt
+            .query_map(params![collection_id], |row| {
+                let c_id: String = row.get(0)?;
+                let i_id: String = row.get(1)?;
+                let i_type: String = row.get(2)?;
+                let pos: i32 = row.get(3)?;
+                let a_str: String = row.get(4)?;
+                Ok((c_id, i_id, i_type, pos, a_str))
+            })
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut results = Vec::new();
+        for item in item_iter {
+            let (collection_id, item_id, item_type, position, a_str) =
+                item.map_err(|e| LoomaError::Database(e.to_string()))?;
+            let added_at = DateTime::parse_from_rfc3339(&a_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            results.push(CollectionItem {
+                collection_id,
+                item_id,
+                item_type,
+                position,
+                added_at,
+            });
+        }
+        Ok(results)
     }
 
     fn remove_item_from_collection(&self, collection_id: &str, item_id: &str) -> LoomaResult<bool> {

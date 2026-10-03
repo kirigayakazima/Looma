@@ -73,20 +73,6 @@ export const App: React.FC = () => {
     loadData();
   }, [loadData]);
 
-  const handleCreateEntity = async (newEntity: { title: string; entity_type: string; description?: string }) => {
-    const entity: Entity = {
-      id: 'ent_' + Math.random().toString(36).substring(2, 9),
-      entity_type: newEntity.entity_type,
-      title: newEntity.title,
-      description: newEntity.description || null,
-      properties: {},
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    await safeInvoke('create_entity', { entity });
-    await loadData();
-  };
 
   const handleCreateMemory = async (newMem: { title: string; content: string; category?: string }) => {
     const memory: Memory = {
@@ -149,16 +135,21 @@ export const App: React.FC = () => {
                 />
               )}
               {currentTab === 'assets' && (
-                <AssetsView assets={assets} onRefresh={loadData} />
+                <AssetsView assets={assets} entities={entities} onRefresh={loadData} />
               )}
               {currentTab === 'entities' && (
-                <EntitiesView entities={entities} onCreateEntity={handleCreateEntity} />
+                <EntitiesView entities={entities} assets={assets} onRefresh={loadData} />
               )}
               {currentTab === 'memories' && (
                 <MemoriesView memories={memories} onCreateMemory={handleCreateMemory} />
               )}
               {currentTab === 'collections' && (
-                <CollectionsView collections={collections} />
+                <CollectionsView
+                  collections={collections}
+                  assets={assets}
+                  entities={entities}
+                  onRefresh={loadData}
+                />
               )}
               {currentTab === 'timeline' && (
                 <div className="p-12 rounded-xl bg-neutral-900 border border-neutral-800 text-center space-y-2 max-w-xl">

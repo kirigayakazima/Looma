@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
@@ -24,16 +24,19 @@ import {
   Play,
   CheckCircle2,
   Loader2,
+  Tag,
+  Plus,
 } from 'lucide-react';
-import { Asset, ScanProgress, ScanSummary } from '../types';
+import { Entity, Asset, ScanProgress, ScanSummary, Relation } from '../types';
 import { useI18n } from '../i18n';
 
 interface AssetsViewProps {
   assets: Asset[];
+  entities: Entity[];
   onRefresh: () => Promise<void> | void;
 }
 
-export const AssetsView: React.FC<AssetsViewProps> = ({ assets, onRefresh }) => {
+export const AssetsView: React.FC<AssetsViewProps> = ({ assets, entities, onRefresh }) => {
   const { t } = useI18n();
 
   // View & Filter states
@@ -54,6 +57,8 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, onRefresh }) => 
   const [assetPreview, setAssetPreview] = useState<string | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [assetRelations, setAssetRelations] = useState<Relation[]>([]);
+  const [showLinkEntityDropdown, setShowLinkEntityDropdown] = useState(false);
 
   // Helper for safe IPC invocation
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
@@ -95,6 +100,62 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, onRefresh }) => 
       setLoadingPreview(false);
     }
   }, [activeAsset]);
+
+  // Load relations for active asset
+  const loadAssetRelations = useCallback(async (assetId: string) => {
+    const rels = await safeInvoke<Relation[]>('list_relations_for_item', { itemId: assetId });
+    setAssetRelations(rels || []);
+  }, []);
+
+  useEffect(() => {
+    if (activeAsset) {
+      loadAssetRelations(activeAsset.id);
+      setShowLinkEntityDropdown(false);
+    } else {
+      setAssetRelations([]);
+    }
+  }, [activeAsset, loadAssetRelations]);
+
+  const handleLinkToEntity = async (entityId: string) => {
+    if (!activeAsset) return;
+    const relation: Relation = {
+      id: 'rel_' + Math.random().toString(36).substring(2, 9),
+      source_id: activeAsset.id,
+      source_type: 'asset',
+      relation_type: 'belongs_to',
+      target_id: entityId,
+      target_type: 'entity',
+      metadata: {},
+      created_at: new Date().toISOString(),
+    };
+    await safeInvoke('create_relation', { relation });
+    await loadAssetRelations(activeAsset.id);
+    setShowLinkEntityDropdown(false);
+  };
+
+  const handleUnlinkFromEntity = async (entityId: string) => {
+    if (!activeAsset) return;
+    await safeInvoke('delete_relation_between', {
+      sourceId: activeAsset.id,
+      targetId: entityId,
+    });
+    await loadAssetRelations(activeAsset.id);
+  };
+
+  const linkedEntitiesForAsset = useMemo(() => {
+    if (!activeAsset) return [];
+    const entityIdSet = new Set(
+      assetRelations
+        .filter((r) => r.source_type === 'entity' || r.target_type === 'entity')
+        .map((r) => (r.source_type === 'entity' ? r.source_id : r.target_id))
+    );
+    return entities.filter((e) => entityIdSet.has(e.id));
+  }, [activeAsset, assetRelations, entities]);
+
+  const unlinkedEntities = useMemo(() => {
+    const linkedIds = new Set(linkedEntitiesForAsset.map((e) => e.id));
+    return entities.filter((e) => !linkedIds.has(e.id));
+  }, [entities, linkedEntitiesForAsset]);
 
   // Pick folder using native dialog
   const handlePickFolder = async () => {
@@ -767,6 +828,68 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, onRefresh }) => 
                     {new Date(activeAsset.modified_at).toLocaleString()}
                   </span>
                 </div>
+              </div>
+
+              {/* Linked Entities Section */}
+              <div className="pt-3 border-t border-neutral-800/60 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
+                    {t.assets.linkedEntitiesLabel}
+                  </span>
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowLinkEntityDropdown(!showLinkEntityDropdown)}
+                      className="flex items-center space-x-1 text-[11px] text-indigo-400 hover:text-indigo-300 transition-colors"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>{t.assets.linkToEntityBtn}</span>
+                    </button>
+
+                    {showLinkEntityDropdown && (
+                      <div className="absolute right-0 top-full mt-1.5 w-52 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl p-1.5 z-20 max-h-48 overflow-y-auto">
+                        {unlinkedEntities.length === 0 ? (
+                          <div className="p-2 text-center text-[10px] text-neutral-500">
+                            {entities.length === 0 ? '暂无实体，请先在「实体概念」中创建' : '所有实体均已关联'}
+                          </div>
+                        ) : (
+                          unlinkedEntities.map((ent) => (
+                            <button
+                              key={ent.id}
+                              onClick={() => handleLinkToEntity(ent.id)}
+                              className="w-full text-left p-1.5 rounded hover:bg-neutral-800 flex items-center justify-between transition-colors text-xs"
+                            >
+                              <span className="text-neutral-200 truncate">{ent.title}</span>
+                              <span className="text-[10px] font-mono text-indigo-400 ml-1">#{ent.entity_type}</span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {linkedEntitiesForAsset.length === 0 ? (
+                  <p className="text-[11px] text-neutral-500 italic">{t.assets.noLinkedEntities}</p>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {linkedEntitiesForAsset.map((ent) => (
+                      <span
+                        key={ent.id}
+                        className="inline-flex items-center space-x-1.5 px-2 py-1 rounded-md bg-indigo-950/40 text-indigo-300 border border-indigo-800/40 text-xs"
+                      >
+                        <Tag className="w-3 h-3 text-indigo-400" />
+                        <span>{ent.title}</span>
+                        <button
+                          onClick={() => handleUnlinkFromEntity(ent.id)}
+                          className="text-neutral-500 hover:text-red-400 ml-1"
+                          title="解除关联"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 

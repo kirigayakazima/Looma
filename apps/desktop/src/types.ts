@@ -92,3 +92,22 @@ export interface Collection {
   created_at: string;
   updated_at: string;
 }
+
+export interface Relation {
+  id: string;
+  source_id: string;
+  source_type: string;
+  relation_type: string;
+  target_id: string;
+  target_type: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface CollectionItem {
+  collection_id: string;
+  item_id: string;
+  item_type: string;
+  position: number;
+  added_at: string;
+}

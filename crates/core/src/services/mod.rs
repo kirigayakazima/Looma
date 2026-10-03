@@ -1,6 +1,6 @@
 use crate::error::LoomaResult;
 use crate::models::{
-    Asset, AssetFilter, Collection, Entity, EntityFilter, Memory, Relation,
+    Asset, AssetFilter, Collection, CollectionItem, Entity, EntityFilter, Memory, Relation,
     VaultInfo, VaultStats,
 };
 
@@ -32,8 +32,10 @@ pub trait EntityService: Send + Sync {
 pub trait RelationService: Send + Sync {
     fn list_relations_for_source(&self, source_id: &str) -> LoomaResult<Vec<Relation>>;
     fn list_relations_for_target(&self, target_id: &str) -> LoomaResult<Vec<Relation>>;
+    fn list_relations_for_item(&self, item_id: &str) -> LoomaResult<Vec<Relation>>;
     fn create_relation(&self, relation: &Relation) -> LoomaResult<()>;
     fn delete_relation(&self, id: &str) -> LoomaResult<bool>;
+    fn delete_relation_between(&self, source_id: &str, target_id: &str) -> LoomaResult<bool>;
 }
 
 pub trait MemoryService: Send + Sync {
@@ -48,6 +50,8 @@ pub trait CollectionService: Send + Sync {
     fn list_collections(&self) -> LoomaResult<Vec<Collection>>;
     fn get_collection_by_id(&self, id: &str) -> LoomaResult<Option<Collection>>;
     fn create_collection(&self, collection: &Collection) -> LoomaResult<()>;
+    fn delete_collection(&self, id: &str) -> LoomaResult<bool>;
+    fn list_items_for_collection(&self, collection_id: &str) -> LoomaResult<Vec<CollectionItem>>;
     fn add_item_to_collection(&self, collection_id: &str, item_id: &str, item_type: &str) -> LoomaResult<()>;
     fn remove_item_from_collection(&self, collection_id: &str, item_id: &str) -> LoomaResult<bool>;
 }
