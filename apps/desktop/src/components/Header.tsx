@@ -1,7 +1,8 @@
 import React from 'react';
-import { Search, Database } from 'lucide-react';
+import { Search, Database, Sun, Moon } from 'lucide-react';
 import { VaultInfo } from '../types';
 import { useI18n } from '../i18n';
+import { useTheme } from '../theme';
 
 interface HeaderProps {
   vaultInfo: VaultInfo | null;
@@ -11,6 +12,7 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({ vaultInfo, currentTitle, onOpenSearch }) => {
   const { t } = useI18n();
+  const { resolvedTheme, toggleTheme } = useTheme();
 
   return (
     <header className="h-14 border-b border-neutral-800 bg-neutral-900/50 backdrop-blur px-6 flex items-center justify-between">
@@ -18,7 +20,7 @@ export const Header: React.FC<HeaderProps> = ({ vaultInfo, currentTitle, onOpenS
         <h2 className="text-sm font-medium text-neutral-200">{currentTitle}</h2>
       </div>
 
-      <div className="flex items-center space-x-4">
+      <div className="flex items-center space-x-3">
         {/* Global Search shortcut (Ctrl+K) */}
         <div
           onClick={onOpenSearch}
@@ -36,6 +38,19 @@ export const Header: React.FC<HeaderProps> = ({ vaultInfo, currentTitle, onOpenS
             {t.header.searchShortcut}
           </kbd>
         </div>
+
+        {/* Quick Theme Toggle */}
+        <button
+          onClick={toggleTheme}
+          title={t.header.themeToggleTip}
+          className="flex items-center justify-center w-8 h-8 rounded-md bg-neutral-800/80 hover:bg-neutral-800 border border-neutral-700/60 text-neutral-400 hover:text-neutral-200 transition-colors cursor-pointer"
+        >
+          {resolvedTheme === 'dark' ? (
+            <Sun className="w-4 h-4 text-amber-400 transition-transform hover:rotate-45" />
+          ) : (
+            <Moon className="w-4 h-4 text-indigo-500 transition-transform hover:-rotate-12" />
+          )}
+        </button>
 
         {/* Database indicator */}
         <div className="flex items-center space-x-1.5 text-xs text-neutral-400 bg-neutral-800/50 px-2.5 py-1 rounded border border-neutral-700/40">

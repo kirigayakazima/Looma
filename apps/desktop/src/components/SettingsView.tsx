@@ -14,8 +14,12 @@ import {
   FolderOpen,
   Terminal,
   Cpu,
+  Sun,
+  Moon,
+  Monitor,
 } from 'lucide-react';
 import { useI18n, Locale } from '../i18n';
+import { useTheme, Theme } from '../theme';
 import { invoke } from '@tauri-apps/api/core';
 
 interface SettingsViewProps {
@@ -25,6 +29,7 @@ interface SettingsViewProps {
 
 export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo, onRefresh }) => {
   const { locale, setLocale, t } = useI18n();
+  const { theme, setTheme } = useTheme();
 
   // Backup & Restore states
   const [isExporting, setIsExporting] = useState(false);
@@ -51,6 +56,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo, onRefresh
   const languages: { code: Locale; label: string; desc: string }[] = [
     { code: 'zh-CN', label: t.settings.langZh, desc: '默认语言 (Default)' },
     { code: 'en-US', label: t.settings.langEn, desc: 'English (US)' },
+  ];
+
+  const themes: { code: Theme; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+    { code: 'dark', label: t.settings.themeDark, icon: Moon },
+    { code: 'light', label: t.settings.themeLight, icon: Sun },
+    { code: 'system', label: t.settings.themeSystem, icon: Monitor },
   ];
 
   // Handle Export Backup
@@ -349,6 +360,47 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo, onRefresh
                   </div>
                   {active && (
                     <div className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-white">
+                      <Check className="w-3 h-3 stroke-[3]" />
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Theme Selection Section */}
+        <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-4">
+          <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
+            <Sun className="w-4 h-4 text-amber-400" />
+            <span>{t.settings.themeTitle}</span>
+          </div>
+          <p className="text-xs text-neutral-400">
+            {t.settings.themeDesc}
+          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+            {themes.map((item) => {
+              const active = theme === item.code;
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.code}
+                  onClick={() => setTheme(item.code)}
+                  className={`p-3 rounded-lg border text-left transition-all flex items-center justify-between cursor-pointer ${
+                    active
+                      ? 'bg-amber-500/10 border-amber-500/80 text-neutral-100 shadow-sm shadow-amber-500/10'
+                      : 'bg-neutral-850 border-neutral-700/60 text-neutral-300 hover:border-neutral-600 hover:bg-neutral-800'
+                  }`}
+                >
+                  <div className="flex items-center space-x-2.5">
+                    <div className={`p-1.5 rounded-md ${active ? 'bg-amber-500/20 text-amber-400' : 'bg-neutral-800 text-neutral-400'}`}>
+                      <Icon className="w-4 h-4" />
+                    </div>
+                    <div className="text-xs font-semibold">{item.label}</div>
+                  </div>
+                  {active && (
+                    <div className="w-5 h-5 rounded-full bg-amber-500 flex items-center justify-center text-white">
                       <Check className="w-3 h-3 stroke-[3]" />
                     </div>
                   )}

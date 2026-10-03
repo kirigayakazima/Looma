@@ -29,6 +29,7 @@ export const zhCN = {
     searchPlaceholder: '搜索资产、实体、记忆手记... (Ctrl+K)',
     searchShortcut: 'Ctrl K',
     versionPrefix: 'v',
+    themeToggleTip: '切换外观主题',
   },
   home: {
     defaultVaultName: '个人资产库',
@@ -51,7 +52,7 @@ export const zhCN = {
     databaseEngineDesc: 'SQLite (WAL模式 + FTS5 全文检索)',
     databaseSize: '数据库大小',
     archPhase: '架构研发阶段',
-    archPhaseVal: 'Phase 4 — 备份与容灾恢复系统已就绪',
+    archPhaseVal: 'Phase 5 — 外部接口系统 (CLI & MCP) 已就绪',
   },
   assets: {
     title: '数字资产浏览器',
@@ -205,6 +206,11 @@ export const zhCN = {
     i18nDesc: '切换系统的显示语言',
     langZh: '简体中文 (Chinese)',
     langEn: 'English (US)',
+    themeTitle: '外观主题 (Appearance Theme)',
+    themeDesc: '切换系统的深色或浅色视觉风格，手记与全景时光轴深度适配',
+    themeDark: '深色模式 (Dark)',
+    themeLight: '浅色模式 (Light)',
+    themeSystem: '跟随系统 (System)',
     storageTitle: '本地资产库路径',
     vaultRootLabel: '资产库数据根路径：',
     databaseFileLabel: 'SQLite 数据库文件：',

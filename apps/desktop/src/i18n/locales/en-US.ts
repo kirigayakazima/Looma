@@ -31,6 +31,7 @@ export const enUS: TranslationType = {
     searchPlaceholder: 'Search assets, entities, memories... (Ctrl+K)',
     searchShortcut: 'Ctrl K',
     versionPrefix: 'v',
+    themeToggleTip: 'Toggle appearance theme',
   },
   home: {
     defaultVaultName: 'Personal Vault',
@@ -53,7 +54,7 @@ export const enUS: TranslationType = {
     databaseEngineDesc: 'SQLite (WAL Mode + FTS5 Full-Text Search)',
     databaseSize: 'Database Size',
     archPhase: 'Architecture Phase',
-    archPhaseVal: 'Phase 4 — Backup & Disaster Recovery Ready',
+    archPhaseVal: 'Phase 5 — External Interfaces (CLI & MCP) Ready',
   },
   assets: {
     title: 'Asset Browser',
@@ -207,6 +208,11 @@ export const enUS: TranslationType = {
     i18nDesc: 'Switch the display language of the application',
     langZh: '简体中文 (Chinese)',
     langEn: 'English (US)',
+    themeTitle: 'Appearance Theme',
+    themeDesc: 'Switch between dark and light themes, fully adapted for reading and timeline browsing',
+    themeDark: 'Dark Mode',
+    themeLight: 'Light Mode',
+    themeSystem: 'Follow System',
     storageTitle: 'Vault Storage Paths',
     vaultRootLabel: 'Vault Data Root:',
     databaseFileLabel: 'SQLite Database File:',
