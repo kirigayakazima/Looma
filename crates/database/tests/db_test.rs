@@ -129,7 +129,31 @@ fn test_in_memory_db_and_services() {
     assert_eq!(tl_asset.len(), 1);
     assert_eq!(tl_asset[0].item_type, "asset");
 
-    // 8. Entity Update & Delete
+    // 8. Backup & Doctor Service
+    let manifest = db.generate_manifest().expect("generate manifest failed");
+    assert_eq!(manifest.manifest_version, "1.0.0");
+    assert!(manifest.assets_count >= 1);
+
+    // Export backup to temp dir
+    let temp_dir = std::env::temp_dir().join("looma_test_backup");
+    let backup_res = db.export_backup(&temp_dir).expect("export backup failed");
+    assert!(!backup_res.backup_path.is_empty());
+    assert!(std::path::Path::new(&backup_res.backup_path).join("manifest.json").exists());
+    assert!(std::path::Path::new(&backup_res.backup_path).join("vault_dump.json").exists());
+
+    // Restore backup
+    let restore_res = db.restore_backup(std::path::Path::new(&backup_res.backup_path)).expect("restore backup failed");
+    assert!(restore_res.restored_assets >= 1);
+
+    // Clean up test backup
+    let _ = std::fs::remove_dir_all(&backup_res.backup_path);
+
+    // Doctor inspect & cleanup
+    let doctor_report = db.doctor_inspect().expect("doctor inspect failed");
+    assert!(doctor_report.integrity_ok);
+    let _ = db.doctor_cleanup_missing().expect("cleanup missing failed");
+
+    // 9. Entity Update & Delete
     let mut updated_entity = fetched;
     updated_entity.title = "BLEACH: Thousand-Year Blood War".to_string();
     db.update_entity(&updated_entity).expect("update entity failed");

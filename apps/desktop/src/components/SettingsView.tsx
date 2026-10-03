@@ -1,30 +1,325 @@
-import React from 'react';
-import { VaultInfo } from '../types';
-import { ShieldCheck, HardDrive, Database, Globe, Check } from 'lucide-react';
+import React, { useState } from 'react';
+import { VaultInfo, BackupResult, RestoreResult, VaultDoctorReport } from '../types';
+import {
+  ShieldCheck,
+  HardDrive,
+  Database,
+  Globe,
+  Check,
+  Archive,
+  RotateCcw,
+  Stethoscope,
+  Sparkles,
+  AlertTriangle,
+  FolderOpen,
+} from 'lucide-react';
 import { useI18n, Locale } from '../i18n';
+import { invoke } from '@tauri-apps/api/core';
 
 interface SettingsViewProps {
   vaultInfo: VaultInfo | null;
+  onRefresh?: () => Promise<void>;
 }
 
-export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo }) => {
+export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo, onRefresh }) => {
   const { locale, setLocale, t } = useI18n();
+
+  // Backup & Restore states
+  const [isExporting, setIsExporting] = useState(false);
+  const [backupResult, setBackupResult] = useState<BackupResult | null>(null);
+
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
+
+  // Doctor states
+  const [isCheckingDoctor, setIsCheckingDoctor] = useState(false);
+  const [doctorReport, setDoctorReport] = useState<VaultDoctorReport | null>(null);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [cleanMessage, setCleanMessage] = useState<string | null>(null);
+
+  const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
+    try {
+      return await invoke<T>(cmd, args);
+    } catch (err) {
+      console.warn(`[Tauri IPC] '${cmd}' failed:`, err);
+      return null;
+    }
+  };
 
   const languages: { code: Locale; label: string; desc: string }[] = [
     { code: 'zh-CN', label: t.settings.langZh, desc: '默认语言 (Default)' },
     { code: 'en-US', label: t.settings.langEn, desc: 'English (US)' },
   ];
 
+  // Handle Export Backup
+  const handleExportBackup = async () => {
+    setIsExporting(true);
+    setBackupResult(null);
+    try {
+      // Allow user to select destination folder, or default
+      const chosenDir = await safeInvoke<string | null>('pick_folder');
+      const res = await safeInvoke<BackupResult>('export_backup', {
+        destinationDir: chosenDir || undefined,
+      });
+      if (res) {
+        setBackupResult(res);
+      }
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // Handle Restore Backup
+  const handleRestoreBackup = async () => {
+    const chosenDir = await safeInvoke<string | null>('pick_folder');
+    if (!chosenDir) return;
+
+    if (!window.confirm(t.settings.restoreConfirm)) return;
+
+    setIsRestoring(true);
+    setRestoreResult(null);
+    try {
+      const res = await safeInvoke<RestoreResult>('restore_backup', {
+        backupPath: chosenDir,
+      });
+      if (res) {
+        setRestoreResult(res);
+        if (onRefresh) {
+          await onRefresh();
+        }
+      }
+    } finally {
+      setIsRestoring(false);
+    }
+  };
+
+  // Handle Doctor Inspection
+  const handleRunDoctor = async () => {
+    setIsCheckingDoctor(true);
+    setCleanMessage(null);
+    try {
+      const report = await safeInvoke<VaultDoctorReport>('doctor_inspect');
+      if (report) {
+        setDoctorReport(report);
+      }
+    } finally {
+      setIsCheckingDoctor(false);
+    }
+  };
+
+  // Handle Doctor Cleanup & Vacuum
+  const handleDoctorCleanup = async () => {
+    setIsCleaning(true);
+    try {
+      const count = await safeInvoke<number>('doctor_cleanup_missing');
+      setCleanMessage(
+        (t.settings.cleanSuccess || 'Cleanup successful!').replace('{count}', (count ?? 0).toString())
+      );
+      // Re-inspect
+      await handleRunDoctor();
+      if (onRefresh) {
+        await onRefresh();
+      }
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const formatBytes = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
+
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-4xl pb-10">
       <div>
         <h3 className="text-base font-semibold text-neutral-100">{t.settings.title}</h3>
         <p className="text-xs text-neutral-400">{t.settings.subtitle}</p>
       </div>
 
       <div className="space-y-4">
+        {/* Vault Backup & Export Section */}
+        <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3">
+          <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
+            <Archive className="w-4 h-4 text-amber-400" />
+            <span>{t.settings.backupTitle}</span>
+          </div>
+          <p className="text-xs text-neutral-400 leading-relaxed">
+            {t.settings.backupDesc}
+          </p>
+
+          <div className="pt-1">
+            <button
+              onClick={handleExportBackup}
+              disabled={isExporting}
+              className="flex items-center space-x-2 px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-medium shadow-sm transition-colors"
+            >
+              <Archive className="w-3.5 h-3.5" />
+              <span>{isExporting ? t.settings.exporting : t.settings.exportBackupBtn}</span>
+            </button>
+          </div>
+
+          {backupResult && (
+            <div className="mt-3 p-3.5 rounded-lg bg-neutral-950 border border-amber-500/30 text-xs space-y-2">
+              <div className="flex items-center space-x-1.5 text-amber-400 font-medium">
+                <Check className="w-4 h-4 text-emerald-400" />
+                <span>{t.settings.exportSuccess}</span>
+              </div>
+              <p className="font-mono text-[11px] text-neutral-300 bg-neutral-900 p-2 rounded break-all select-text">
+                {backupResult.backup_path}
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-neutral-400 pt-1">
+                <div>
+                  资产清单: <span className="text-neutral-200 font-mono">{backupResult.manifest.assets_count}</span>
+                </div>
+                <div>
+                  实体概念: <span className="text-neutral-200 font-mono">{backupResult.manifest.entities_count}</span>
+                </div>
+                <div>
+                  记忆手记: <span className="text-neutral-200 font-mono">{backupResult.manifest.memories_count}</span>
+                </div>
+                <div>
+                  耗时: <span className="text-neutral-200 font-mono">{backupResult.duration_ms} ms</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Restore Vault Section */}
+        <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3">
+          <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
+            <RotateCcw className="w-4 h-4 text-sky-400" />
+            <span>{t.settings.restoreTitle}</span>
+          </div>
+          <p className="text-xs text-neutral-400 leading-relaxed">
+            {t.settings.restoreDesc}
+          </p>
+
+          <div className="pt-1">
+            <button
+              onClick={handleRestoreBackup}
+              disabled={isRestoring}
+              className="flex items-center space-x-2 px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-750 disabled:opacity-50 text-neutral-200 text-xs font-medium border border-neutral-700 transition-colors"
+            >
+              <FolderOpen className="w-3.5 h-3.5 text-sky-400" />
+              <span>{isRestoring ? t.settings.restoring : t.settings.restoreBtn}</span>
+            </button>
+          </div>
+
+          {restoreResult && (
+            <div className="mt-3 p-3.5 rounded-lg bg-neutral-950 border border-sky-500/30 text-xs space-y-1.5">
+              <div className="flex items-center space-x-1.5 text-sky-400 font-medium">
+                <Check className="w-4 h-4 text-emerald-400" />
+                <span>{t.settings.restoreSuccess}</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-neutral-400">
+                <div>
+                  恢复资产: <span className="text-neutral-200 font-mono">{restoreResult.restored_assets}</span>
+                </div>
+                <div>
+                  恢复实体: <span className="text-neutral-200 font-mono">{restoreResult.restored_entities}</span>
+                </div>
+                <div>
+                  恢复手记: <span className="text-neutral-200 font-mono">{restoreResult.restored_memories}</span>
+                </div>
+                <div>
+                  耗时: <span className="text-neutral-200 font-mono">{restoreResult.duration_ms} ms</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Vault Doctor Section */}
+        <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3">
+          <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
+            <Stethoscope className="w-4 h-4 text-emerald-400" />
+            <span>{t.settings.doctorTitle}</span>
+          </div>
+          <p className="text-xs text-neutral-400 leading-relaxed">
+            {t.settings.doctorDesc}
+          </p>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              onClick={handleRunDoctor}
+              disabled={isCheckingDoctor}
+              className="flex items-center space-x-2 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-medium shadow-sm transition-colors"
+            >
+              <Stethoscope className="w-3.5 h-3.5" />
+              <span>{isCheckingDoctor ? t.settings.checking : t.settings.runDoctorBtn}</span>
+            </button>
+
+            {doctorReport && (
+              <button
+                onClick={handleDoctorCleanup}
+                disabled={isCleaning}
+                className="flex items-center space-x-2 px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-750 disabled:opacity-50 text-neutral-300 text-xs font-medium border border-neutral-700 transition-colors"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span>{isCleaning ? t.settings.cleaning : t.settings.cleanDoctorBtn}</span>
+              </button>
+            )}
+          </div>
+
+          {cleanMessage && (
+            <div className="text-xs text-emerald-400 font-medium bg-emerald-950/40 border border-emerald-500/20 p-2 rounded">
+              {cleanMessage}
+            </div>
+          )}
+
+          {doctorReport && (
+            <div className="mt-3 p-3.5 rounded-lg bg-neutral-950 border border-neutral-800 text-xs space-y-2">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <div className="p-2.5 rounded bg-neutral-900 border border-neutral-800">
+                  <span className="text-neutral-500 block text-[11px] mb-0.5">{t.settings.doctorIntegrity}</span>
+                  <span className={`font-medium ${doctorReport.integrity_ok ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {doctorReport.integrity_message}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded bg-neutral-900 border border-neutral-800">
+                  <span className="text-neutral-500 block text-[11px] mb-0.5">{t.settings.doctorDbSize}</span>
+                  <span className="font-mono text-neutral-200">
+                    {formatBytes(doctorReport.database_size_bytes)}
+                  </span>
+                </div>
+                <div className="p-2.5 rounded bg-neutral-900 border border-neutral-800">
+                  <span className="text-neutral-500 block text-[11px] mb-0.5">活跃资产 / 总资产</span>
+                  <span className="font-mono text-neutral-200">
+                    {doctorReport.active_assets} / {doctorReport.total_assets}
+                  </span>
+                </div>
+              </div>
+
+              {doctorReport.missing_assets.length > 0 ? (
+                <div className="p-3 rounded bg-rose-950/20 border border-rose-500/30 space-y-1">
+                  <div className="flex items-center space-x-1.5 text-rose-400 text-xs font-semibold">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>
+                      {t.settings.doctorMissing} ({doctorReport.missing_assets.length})
+                    </span>
+                  </div>
+                  <div className="max-h-24 overflow-y-auto font-mono text-[10px] text-neutral-400 space-y-0.5">
+                    {doctorReport.missing_assets.map((p) => (
+                      <div key={p} className="truncate">{p}</div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-[11px] text-emerald-400 flex items-center space-x-1 pt-1">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{t.settings.doctorMissingNone}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* I18N Language Selection Section */}
-        <div className="p-5 rounded-lg bg-neutral-900 border border-neutral-800 space-y-4">
+        <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-4">
           <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
             <Globe className="w-4 h-4 text-indigo-400" />
             <span>{t.settings.i18nTitle}</span>
@@ -61,8 +356,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo }) => {
           </div>
         </div>
 
-        {/* Vault Paths */}
-        <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 space-y-3">
+        {/* Vault Storage Paths */}
+        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3">
           <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
             <HardDrive className="w-4 h-4 text-indigo-400" />
             <span>{t.settings.storageTitle}</span>
@@ -84,7 +379,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo }) => {
         </div>
 
         {/* Database & Architecture */}
-        <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 space-y-3">
+        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3">
           <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
             <Database className="w-4 h-4 text-emerald-400" />
             <span>{t.settings.engineTitle}</span>
@@ -102,9 +397,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo }) => {
         </div>
 
         {/* Privacy Baseline */}
-        <div className="p-4 rounded-lg bg-neutral-900 border border-neutral-800 space-y-2">
-          <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
-            <ShieldCheck className="w-4 h-4 text-indigo-400" />
+        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 space-y-2">
+          <div className="flex items-center space-x-2 text-xs font-semibold text-emerald-400">
+            <ShieldCheck className="w-4 h-4" />
             <span>{t.settings.privacyTitle}</span>
           </div>
           <p className="text-xs text-neutral-400 leading-relaxed">

@@ -168,7 +168,7 @@ export const App: React.FC = () => {
                 />
               )}
               {currentTab === 'settings' && (
-                <SettingsView vaultInfo={vaultInfo} />
+                <SettingsView vaultInfo={vaultInfo} onRefresh={loadData} />
               )}
             </>
           )}

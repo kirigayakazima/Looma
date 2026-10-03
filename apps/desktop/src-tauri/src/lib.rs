@@ -237,6 +237,38 @@ fn query_timeline(filter: Option<TimelineFilter>, state: State<'_, AppState>) ->
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn generate_manifest(state: State<'_, AppState>) -> Result<VaultManifest, String> {
+    state.db.generate_manifest().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn export_backup(destination_dir: Option<String>, state: State<'_, AppState>) -> Result<BackupResult, String> {
+    let dest_path = if let Some(dir) = destination_dir {
+        PathBuf::from(dir)
+    } else {
+        resolve_default_vault_path().join("backups")
+    };
+    std::fs::create_dir_all(&dest_path).map_err(|e| e.to_string())?;
+    state.db.export_backup(&dest_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn restore_backup(backup_path: String, state: State<'_, AppState>) -> Result<RestoreResult, String> {
+    let p = PathBuf::from(backup_path);
+    state.db.restore_backup(&p).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn doctor_inspect(state: State<'_, AppState>) -> Result<VaultDoctorReport, String> {
+    state.db.doctor_inspect().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn doctor_cleanup_missing(state: State<'_, AppState>) -> Result<usize, String> {
+    state.db.doctor_cleanup_missing().map_err(|e| e.to_string())
+}
+
 fn resolve_default_vault_path() -> PathBuf {
     if let Some(proj_dirs) = ProjectDirs::from("com", "looma", "Looma") {
         let data_dir = proj_dirs.data_dir();
@@ -292,7 +324,12 @@ pub fn run() {
             list_collection_items,
             add_item_to_collection,
             remove_item_from_collection,
-            query_timeline
+            query_timeline,
+            generate_manifest,
+            export_backup,
+            restore_backup,
+            doctor_inspect,
+            doctor_cleanup_missing
         ])
         .run(tauri::generate_context!())
     {

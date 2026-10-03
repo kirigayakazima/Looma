@@ -1,7 +1,8 @@
 use crate::error::LoomaResult;
 use crate::models::{
-    Asset, AssetFilter, Collection, CollectionItem, Entity, EntityFilter, Memory, Relation,
-    TimelineFilter, TimelineItem, VaultInfo, VaultStats,
+    Asset, AssetFilter, BackupResult, Collection, CollectionItem, Entity, EntityFilter, Memory,
+    Relation, RestoreResult, TimelineFilter, TimelineItem, VaultDoctorReport, VaultInfo,
+    VaultManifest, VaultStats,
 };
 
 pub trait VaultService: Send + Sync {
@@ -58,4 +59,12 @@ pub trait CollectionService: Send + Sync {
 
 pub trait TimelineService: Send + Sync {
     fn query_timeline(&self, filter: &TimelineFilter) -> LoomaResult<Vec<TimelineItem>>;
+}
+
+pub trait BackupService: Send + Sync {
+    fn generate_manifest(&self) -> LoomaResult<VaultManifest>;
+    fn export_backup(&self, destination_dir: &std::path::Path) -> LoomaResult<BackupResult>;
+    fn restore_backup(&self, backup_dir_or_file: &std::path::Path) -> LoomaResult<RestoreResult>;
+    fn doctor_inspect(&self) -> LoomaResult<VaultDoctorReport>;
+    fn doctor_cleanup_missing(&self) -> LoomaResult<usize>;
 }

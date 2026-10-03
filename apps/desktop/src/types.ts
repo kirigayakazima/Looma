@@ -127,3 +127,39 @@ export interface TimelineFilter {
   limit?: number;
   offset?: number;
 }
+
+export interface VaultManifest {
+  manifest_version: string;
+  created_at: string;
+  vault_info: VaultInfo;
+  stats: VaultStats;
+  assets_count: number;
+  entities_count: number;
+  memories_count: number;
+  collections_count: number;
+  relations_count: number;
+}
+
+export interface BackupResult {
+  backup_path: string;
+  manifest: VaultManifest;
+  duration_ms: number;
+}
+
+export interface RestoreResult {
+  restored_assets: number;
+  restored_entities: number;
+  restored_memories: number;
+  restored_collections: number;
+  restored_relations: number;
+  duration_ms: number;
+}
+
+export interface VaultDoctorReport {
+  total_assets: number;
+  active_assets: number;
+  missing_assets: string[];
+  database_size_bytes: number;
+  integrity_ok: boolean;
+  integrity_message: string;
+}

@@ -1452,3 +1452,279 @@ impl TimelineService for LoomaDb {
         Ok(items)
     }
 }
+
+impl BackupService for LoomaDb {
+    fn generate_manifest(&self) -> LoomaResult<VaultManifest> {
+        let vault_info = self.get_vault_info()?;
+        let stats = self.get_vault_stats()?;
+        let assets_count = self.count_assets()? as usize;
+        let entities_count = self.count_entities()? as usize;
+        let memories = self.list_memories(100000, 0)?;
+        let collections = self.list_collections()?;
+
+        let conn = self.conn.lock();
+        let relations_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM relations", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        Ok(VaultManifest {
+            manifest_version: "1.0.0".to_string(),
+            created_at: Utc::now(),
+            vault_info,
+            stats,
+            assets_count,
+            entities_count,
+            memories_count: memories.len(),
+            collections_count: collections.len(),
+            relations_count: relations_count as usize,
+        })
+    }
+
+    fn export_backup(&self, destination_dir: &Path) -> LoomaResult<BackupResult> {
+        let start = std::time::Instant::now();
+        let manifest = self.generate_manifest()?;
+
+        let timestamp_str = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let backup_folder_name = format!("looma_vault_backup_{}", timestamp_str);
+        let backup_path = destination_dir.join(backup_folder_name);
+
+        std::fs::create_dir_all(&backup_path)
+            .map_err(|e| LoomaError::Vault(format!("Failed to create backup directory: {e}")))?;
+
+        // 1. Write manifest.json
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(LoomaError::Serialization)?;
+        std::fs::write(backup_path.join("manifest.json"), manifest_json)
+            .map_err(|e| LoomaError::Vault(format!("Failed to write manifest.json: {e}")))?;
+
+        // 2. Fetch all data
+        let assets = self.query_assets(&AssetFilter::default())?;
+        let entities = self.list_entities(&EntityFilter::default())?;
+        let memories = self.list_memories(100000, 0)?;
+        let collections = self.list_collections()?;
+
+        let mut relations = Vec::new();
+        {
+            let conn = self.conn.lock();
+            let mut stmt = conn
+                .prepare("SELECT id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at FROM relations")
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+            let rel_iter = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let s_id: String = row.get(1)?;
+                    let s_type: String = row.get(2)?;
+                    let r_type: String = row.get(3)?;
+                    let t_id: String = row.get(4)?;
+                    let t_type: String = row.get(5)?;
+                    let meta_str: String = row.get(6)?;
+                    let c_str: String = row.get(7)?;
+                    Ok((id, s_id, s_type, r_type, t_id, t_type, meta_str, c_str))
+                })
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for r in rel_iter {
+                let (id, source_id, source_type, relation_type, target_id, target_type, meta_str, c_str) =
+                    r.map_err(|e| LoomaError::Database(e.to_string()))?;
+                let metadata = serde_json::from_str(&meta_str).unwrap_or(Value::Object(Default::default()));
+                let created_at = DateTime::parse_from_rfc3339(&c_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                relations.push(Relation {
+                    id,
+                    source_id,
+                    source_type,
+                    relation_type,
+                    target_id,
+                    target_type,
+                    metadata,
+                    created_at,
+                });
+            }
+        }
+
+        // 3. Write vault_dump.json
+        let dump = VaultExportDump {
+            manifest: manifest.clone(),
+            assets,
+            entities,
+            memories: memories.clone(),
+            collections,
+            relations,
+        };
+        let dump_json = serde_json::to_string_pretty(&dump)
+            .map_err(LoomaError::Serialization)?;
+        std::fs::write(backup_path.join("vault_dump.json"), dump_json)
+            .map_err(|e| LoomaError::Vault(format!("Failed to write vault_dump.json: {e}")))?;
+
+        // 4. Export human-readable Markdown notes in memories/ subfolder
+        let memories_dir = backup_path.join("memories");
+        std::fs::create_dir_all(&memories_dir)
+            .map_err(|e| LoomaError::Vault(format!("Failed to create memories backup dir: {e}")))?;
+
+        for mem in memories {
+            let sanitized_title: String = mem
+                .title
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+                .collect();
+            let sanitized_title = sanitized_title.trim();
+            let filename = if sanitized_title.is_empty() {
+                format!("{}.md", mem.id)
+            } else {
+                format!("{}_{}.md", sanitized_title, &mem.id[..mem.id.len().min(8)])
+            };
+
+            let md_content = format!(
+                "---\nid: {}\ntitle: {}\ncategory: {}\nrecorded_at: {}\n---\n\n{}",
+                mem.id,
+                mem.title,
+                mem.category.unwrap_or_default(),
+                mem.recorded_at.to_rfc3339(),
+                mem.content
+            );
+            std::fs::write(memories_dir.join(filename), md_content).ok();
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        Ok(BackupResult {
+            backup_path: backup_path.to_string_lossy().to_string(),
+            manifest,
+            duration_ms,
+        })
+    }
+
+    fn restore_backup(&self, backup_dir_or_file: &Path) -> LoomaResult<RestoreResult> {
+        let start = std::time::Instant::now();
+        let target_dir = if backup_dir_or_file.is_dir() {
+            backup_dir_or_file.to_path_buf()
+        } else {
+            backup_dir_or_file.parent().unwrap_or(backup_dir_or_file).to_path_buf()
+        };
+
+        let dump_path = target_dir.join("vault_dump.json");
+        if !dump_path.exists() {
+            return Err(LoomaError::Vault(format!(
+                "Backup archive invalid: vault_dump.json not found in {:?}",
+                target_dir
+            )));
+        }
+
+        let dump_str = std::fs::read_to_string(&dump_path)
+            .map_err(|e| LoomaError::Vault(format!("Failed to read vault_dump.json: {e}")))?;
+        let dump: VaultExportDump = serde_json::from_str(&dump_str)
+            .map_err(LoomaError::Serialization)?;
+
+        let mut restored_assets = 0;
+        let mut restored_entities = 0;
+        let mut restored_memories = 0;
+        let mut restored_collections = 0;
+        let mut restored_relations = 0;
+
+        for asset in dump.assets {
+            self.upsert_asset(&asset)?;
+            restored_assets += 1;
+        }
+
+        for entity in dump.entities {
+            if self.get_entity_by_id(&entity.id)?.is_some() {
+                self.update_entity(&entity)?;
+            } else {
+                self.create_entity(&entity)?;
+            }
+            restored_entities += 1;
+        }
+
+        for memory in dump.memories {
+            if self.get_memory_by_id(&memory.id)?.is_some() {
+                self.update_memory(&memory)?;
+            } else {
+                self.create_memory(&memory)?;
+            }
+            restored_memories += 1;
+        }
+
+        for collection in dump.collections {
+            if self.get_collection_by_id(&collection.id)?.is_none() {
+                self.create_collection(&collection)?;
+            }
+            restored_collections += 1;
+        }
+
+        for relation in dump.relations {
+            let _ = self.create_relation(&relation);
+            restored_relations += 1;
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        Ok(RestoreResult {
+            restored_assets,
+            restored_entities,
+            restored_memories,
+            restored_collections,
+            restored_relations,
+            duration_ms,
+        })
+    }
+
+    fn doctor_inspect(&self) -> LoomaResult<VaultDoctorReport> {
+        let assets = self.query_assets(&AssetFilter::default())?;
+        let total_assets = assets.len();
+        let mut active_assets = 0;
+        let mut missing_assets = Vec::new();
+
+        for asset in assets {
+            if let Some(ref p) = asset.path {
+                if Path::new(p).exists() {
+                    active_assets += 1;
+                } else {
+                    missing_assets.push(p.clone());
+                }
+            } else {
+                active_assets += 1;
+            }
+        }
+
+        let db_size = std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0);
+
+        let conn = self.conn.lock();
+        let integrity_check: String = conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap_or_else(|e| e.to_string());
+        let integrity_ok = integrity_check == "ok";
+
+        Ok(VaultDoctorReport {
+            total_assets,
+            active_assets,
+            missing_assets,
+            database_size_bytes: db_size,
+            integrity_ok,
+            integrity_message: integrity_check,
+        })
+    }
+
+    fn doctor_cleanup_missing(&self) -> LoomaResult<usize> {
+        let report = self.doctor_inspect()?;
+        let missing_count = report.missing_assets.len();
+
+        if missing_count > 0 {
+            let conn = self.conn.lock();
+            for missing_path in &report.missing_assets {
+                let _ = conn.execute(
+                    "UPDATE assets SET status = 'missing' WHERE path = ?1",
+                    params![missing_path],
+                );
+            }
+        }
+
+        // Run VACUUM to defragment and compact SQLite database
+        {
+            let conn = self.conn.lock();
+            conn.execute_batch("VACUUM;").ok();
+        }
+
+        Ok(missing_count)
+    }
+}
