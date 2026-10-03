@@ -8,6 +8,7 @@ import { EntitiesView } from './components/EntitiesView';
 import { MemoriesView } from './components/MemoriesView';
 import { CollectionsView } from './components/CollectionsView';
 import { SettingsView } from './components/SettingsView';
+import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { VaultInfo, VaultStats, Asset, Entity, Memory, Collection } from './types';
 import { useI18n } from './i18n';
 
@@ -21,6 +22,7 @@ export const App: React.FC = () => {
   const [memories, setMemories] = useState<Memory[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
 
   // Safe invoke wrapper with mock fallback for web development preview
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
@@ -73,22 +75,17 @@ export const App: React.FC = () => {
     loadData();
   }, [loadData]);
 
-
-  const handleCreateMemory = async (newMem: { title: string; content: string; category?: string }) => {
-    const memory: Memory = {
-      id: 'mem_' + Math.random().toString(36).substring(2, 9),
-      title: newMem.title,
-      content: newMem.content,
-      category: newMem.category || null,
-      metadata: {},
-      recorded_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+  // Global Ctrl+K / Cmd+K listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsSearchOpen((prev) => !prev);
+      }
     };
-
-    await safeInvoke('create_memory', { memory });
-    await loadData();
-  };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const getTitle = () => {
     switch (currentTab) {
@@ -118,7 +115,11 @@ export const App: React.FC = () => {
       />
 
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
-        <Header vaultInfo={vaultInfo} currentTitle={getTitle()} />
+        <Header
+          vaultInfo={vaultInfo}
+          currentTitle={getTitle()}
+          onOpenSearch={() => setIsSearchOpen(true)}
+        />
 
         <main className="flex-1 overflow-y-auto p-6">
           {loading && !vaultInfo ? (
@@ -141,7 +142,7 @@ export const App: React.FC = () => {
                 <EntitiesView entities={entities} assets={assets} onRefresh={loadData} />
               )}
               {currentTab === 'memories' && (
-                <MemoriesView memories={memories} onCreateMemory={handleCreateMemory} />
+                <MemoriesView memories={memories} onRefresh={loadData} />
               )}
               {currentTab === 'collections' && (
                 <CollectionsView
@@ -166,6 +167,20 @@ export const App: React.FC = () => {
           )}
         </main>
       </div>
+
+      {/* Global Quick Search Modal */}
+      <GlobalSearchModal
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        assets={assets}
+        entities={entities}
+        collections={collections}
+        memories={memories}
+        onNavigate={(tab) => {
+          setCurrentTab(tab);
+          setIsSearchOpen(false);
+        }}
+      />
     </div>
   );
 };

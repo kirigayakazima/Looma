@@ -186,6 +186,16 @@ fn create_memory(memory: Memory, state: State<'_, AppState>) -> Result<(), Strin
 }
 
 #[tauri::command]
+fn update_memory(memory: Memory, state: State<'_, AppState>) -> Result<(), String> {
+    state.db.update_memory(&memory).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_memory(id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    state.db.delete_memory(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_collections(state: State<'_, AppState>) -> Result<Vec<Collection>, String> {
     state.db.list_collections().map_err(|e| e.to_string())
 }
@@ -266,6 +276,8 @@ pub fn run() {
             list_relations_for_item,
             list_memories,
             create_memory,
+            update_memory,
+            delete_memory,
             list_collections,
             get_collection,
             create_collection,
