@@ -15,7 +15,7 @@ const ThemeContext = createContext<ThemeContextType | null>(null);
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [theme, setThemeState] = useState<Theme>(() => {
     const saved = localStorage.getItem('looma_theme') as Theme | null;
-    return saved && (saved === 'dark' || saved === 'light' || saved === 'system') ? saved : 'dark';
+    return saved && (saved === 'dark' || saved === 'light' || saved === 'system') ? saved : 'light';
   });
 
   const [systemIsDark, setSystemIsDark] = useState<boolean>(() => {
