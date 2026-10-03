@@ -10,6 +10,7 @@ description = "Looma Model Context Protocol (MCP) Server - AI agent interface"
 looma-core.workspace = true
 looma-database.workspace = true
 looma-scanner.workspace = true
+looma-intelligence.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

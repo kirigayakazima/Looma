@@ -8,6 +8,7 @@ import { EntitiesView } from './components/EntitiesView';
 import { MemoriesView } from './components/MemoriesView';
 import { CollectionsView } from './components/CollectionsView';
 import { TimelineView } from './components/TimelineView';
+import { InsightsView } from './components/InsightsView';
 import { SettingsView } from './components/SettingsView';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { VaultInfo, VaultStats, Asset, Entity, Memory, Collection } from './types';
@@ -102,6 +103,8 @@ export const App: React.FC = () => {
         return t.nav.timeline;
       case 'memories':
         return t.nav.memories;
+      case 'insights':
+        return t.nav.insights;
       case 'settings':
         return t.nav.settings;
     }
@@ -166,6 +169,9 @@ export const App: React.FC = () => {
                   onRefresh={loadData}
                   onNavigateTab={(tab) => setCurrentTab(tab)}
                 />
+              )}
+              {currentTab === 'insights' && (
+                <InsightsView onRefreshAll={loadData} />
               )}
               {currentTab === 'settings' && (
                 <SettingsView vaultInfo={vaultInfo} onRefresh={loadData} />

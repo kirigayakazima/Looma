@@ -64,8 +64,20 @@ enum Commands {
     #[command(about = "Inspect vault health, check missing files and compact database")]
     Doctor(DoctorArgs),
 
+    #[command(about = "Generate AI smart insights and relationship suggestions")]
+    Suggest(SuggestArgs),
+
     #[command(about = "Run Model Context Protocol (MCP) server over stdio for AI agents")]
     Mcp,
+}
+
+#[derive(Args)]
+struct SuggestArgs {
+    #[arg(short, long, help = "Filter suggestion type: relation, tag, cluster")]
+    kind: Option<String>,
+
+    #[arg(long, help = "Automatically apply all high-confidence suggestions")]
+    auto_apply: bool,
 }
 
 #[derive(Args)]
@@ -416,6 +428,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\nCleaning missing assets and compacting database (VACUUM)...");
                 let cleaned = db.doctor_cleanup_missing()?;
                 println!("Successfully cleaned {} missing items and compacted SQLite database!", cleaned);
+            }
+        }
+
+        Commands::Suggest(args) => {
+            println!("Generating Smart Insights & Relationship Suggestions (Phase 6)...");
+            let insights = looma_intelligence::IntelligenceEngine::generate_insights(&db)?;
+
+            println!(
+                "\nFound {} suggestions in total: {} relations, {} tags, {} clusters\n",
+                insights.total_suggestions,
+                insights.relation_suggestions.len(),
+                insights.tag_suggestions.len(),
+                insights.cluster_suggestions.len()
+            );
+
+            // Filter if requested
+            let filter = args.kind.as_deref().unwrap_or("all");
+
+            if filter == "all" || filter == "relation" {
+                if !insights.relation_suggestions.is_empty() {
+                    println!("--- Relationship Suggestions ---");
+                    for s in &insights.relation_suggestions {
+                        println!("  [{:.0}% Confidence] {}", s.confidence * 100.0, s.title);
+                        println!("     Reason: {}", s.description);
+                    }
+                    println!();
+                }
+            }
+
+            if filter == "all" || filter == "cluster" {
+                if !insights.cluster_suggestions.is_empty() {
+                    println!("--- Collection Clustering Suggestions ---");
+                    for s in &insights.cluster_suggestions {
+                        println!("  [{:.0}% Confidence] {}", s.confidence * 100.0, s.title);
+                        println!("     Reason: {}", s.description);
+                    }
+                    println!();
+                }
+            }
+
+            if filter == "all" || filter == "tag" {
+                if !insights.tag_suggestions.is_empty() {
+                    println!("--- Smart Tag Suggestions (First 5) ---");
+                    for s in insights.tag_suggestions.iter().take(5) {
+                        println!("  {} -> [{}]", s.title, s.tags.join(", "));
+                    }
+                    println!();
+                }
+            }
+
+            if args.auto_apply {
+                println!("Auto-applying high-confidence suggestions...");
+                let mut applied_count = 0;
+                for s in &insights.relation_suggestions {
+                    if s.confidence >= 0.85 {
+                        if looma_intelligence::IntelligenceEngine::apply_suggestion(&db, s)? {
+                            applied_count += 1;
+                        }
+                    }
+                }
+                for s in &insights.cluster_suggestions {
+                    if s.confidence >= 0.85 {
+                        if looma_intelligence::IntelligenceEngine::apply_suggestion(&db, s)? {
+                            applied_count += 1;
+                        }
+                    }
+                }
+                println!("Applied {} smart suggestions successfully!", applied_count);
             }
         }
 

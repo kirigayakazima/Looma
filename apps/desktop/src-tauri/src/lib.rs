@@ -269,6 +269,22 @@ fn doctor_cleanup_missing(state: State<'_, AppState>) -> Result<usize, String> {
     state.db.doctor_cleanup_missing().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_smart_insights(
+    state: State<'_, AppState>,
+) -> Result<looma_intelligence::SmartInsightsReport, String> {
+    looma_intelligence::IntelligenceEngine::generate_insights(&state.db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn apply_smart_suggestion(
+    state: State<'_, AppState>,
+    suggestion: looma_intelligence::Suggestion,
+) -> Result<bool, String> {
+    looma_intelligence::IntelligenceEngine::apply_suggestion(&state.db, &suggestion)
+        .map_err(|e| e.to_string())
+}
+
 fn resolve_default_vault_path() -> PathBuf {
     if let Some(proj_dirs) = ProjectDirs::from("com", "looma", "Looma") {
         let data_dir = proj_dirs.data_dir();
@@ -329,7 +345,9 @@ pub fn run() {
             export_backup,
             restore_backup,
             doctor_inspect,
-            doctor_cleanup_missing
+            doctor_cleanup_missing,
+            get_smart_insights,
+            apply_smart_suggestion
         ])
         .run(tauri::generate_context!())
     {

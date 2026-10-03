@@ -3,6 +3,7 @@ members = [
     "crates/core",
     "crates/database",
     "crates/scanner",
+    "crates/intelligence",
     "crates/mcp",
     "crates/cli",
     "apps/desktop/src-tauri",
@@ -20,6 +21,7 @@ license = "MIT"
 looma-core = { path = "crates/core" }
 looma-database = { path = "crates/database" }
 looma-scanner = { path = "crates/scanner" }
+looma-intelligence = { path = "crates/intelligence" }
 looma-mcp = { path = "crates/mcp" }
 
 # CLI & Arguments

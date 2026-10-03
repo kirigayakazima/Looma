@@ -14,6 +14,7 @@ path = "src/main.rs"
 looma-core.workspace = true
 looma-database.workspace = true
 looma-scanner.workspace = true
+looma-intelligence.workspace = true
 looma-mcp.workspace = true
 clap.workspace = true
 serde.workspace = true

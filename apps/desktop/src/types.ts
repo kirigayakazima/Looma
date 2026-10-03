@@ -163,3 +163,27 @@ export interface VaultDoctorReport {
   integrity_ok: boolean;
   integrity_message: string;
 }
+
+export type SuggestionType = 'relation' | 'tag' | 'cluster';
+
+export interface Suggestion {
+  id: string;
+  suggestion_type: SuggestionType;
+  title: string;
+  description: string;
+  confidence: number;
+  source_id: string;
+  source_name: string;
+  target_id?: string;
+  target_name?: string;
+  relation_type?: string;
+  tags: string[];
+  action_payload?: Record<string, unknown>;
+}
+
+export interface SmartInsightsReport {
+  total_suggestions: number;
+  relation_suggestions: Suggestion[];
+  tag_suggestions: Suggestion[];
+  cluster_suggestions: Suggestion[];
+}

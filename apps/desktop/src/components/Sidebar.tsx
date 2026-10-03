@@ -6,12 +6,13 @@ import {
   BookmarkCheck,
   Clock,
   BookOpen,
+  Sparkles,
   Settings,
   HardDrive
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 
-export type NavTab = 'home' | 'assets' | 'entities' | 'collections' | 'timeline' | 'memories' | 'settings';
+export type NavTab = 'home' | 'assets' | 'entities' | 'collections' | 'timeline' | 'memories' | 'insights' | 'settings';
 
 interface SidebarProps {
   currentTab: NavTab;
@@ -29,6 +30,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onSelectTab, vault
     { id: 'collections', label: t.nav.collections, icon: <BookmarkCheck className="w-4 h-4" /> },
     { id: 'timeline', label: t.nav.timeline, icon: <Clock className="w-4 h-4" /> },
     { id: 'memories', label: t.nav.memories, icon: <BookOpen className="w-4 h-4" /> },
+    { id: 'insights', label: t.nav.insights, icon: <Sparkles className="w-4 h-4 text-amber-500" /> },
     { id: 'settings', label: t.nav.settings, icon: <Settings className="w-4 h-4" /> },
   ];
 

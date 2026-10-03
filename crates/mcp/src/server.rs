@@ -250,6 +250,14 @@ impl McpServer {
                         "cleanup_missing": { "type": "boolean", "description": "If true, mark missing assets and run VACUUM" }
                     }
                 }
+            }),
+            json!({
+                "name": "get_smart_insights",
+                "description": "Generate Phase 6 AI smart insights: relation suggestions, cluster proposals, and tag recommendations",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             })
         ]
     }
@@ -402,6 +410,12 @@ impl McpServer {
                 } else {
                     serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
                 }
+            }
+
+            "get_smart_insights" => {
+                let insights = looma_intelligence::IntelligenceEngine::generate_insights(&self.db)
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&insights).map_err(|e| e.to_string())
             }
 
             _ => Err(format!("Unknown tool: {name}")),
