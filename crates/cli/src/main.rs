@@ -245,6 +245,13 @@ enum WorkCommands {
         #[arg(short, long, default_value = "referenced_by", help = "Relation descriptor (attaches, referenced_by, created_by, etc.)")]
         relation: String,
     },
+    #[command(about = "Ensure a local directory asset and link it to a work")]
+    LinkDir {
+        #[arg(help = "Work Entity ID")]
+        work_id: String,
+        #[arg(help = "Filesystem directory path")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -569,6 +576,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let rel = core.link_work_asset("cli", &work_id, &target_id, Some(&relation))?;
                     println!("Linked work {} <-> asset {} with [{}] (Rel ID: {})", work_id, target_id, rel.relation_type, rel.id);
                 }
+            }
+            WorkCommands::LinkDir { work_id, path } => {
+                let path_str = path.to_string_lossy();
+                let (asset, rel) = core.link_work_directory("cli", &work_id, &path_str)?;
+                println!("Successfully linked directory asset:");
+                println!("  Asset ID: {}", asset.id);
+                println!("  Path:     {}", asset.path.unwrap_or_default());
+                println!("  Relation: {} [{}]", rel.id, rel.relation_type);
             }
         },
 

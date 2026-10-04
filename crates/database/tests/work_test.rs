@@ -316,3 +316,112 @@ fn test_game_library_extension_multi_location_and_cover() {
     assert_eq!(games.len(), 1);
     assert_eq!(games[0].title, "NieR:Automata");
 }
+
+#[test]
+fn test_game_library_patch_data_integrity_and_directory_assets() {
+    let temp_root = std::env::temp_dir().join(format!("looma_patch_test_{}", uuid::Uuid::new_v4()));
+    let game_a_dir = temp_root.join("Games").join("GameA");
+    let game_b_dir = temp_root.join("Games").join("GameB");
+    let game_c_dir = temp_root.join("Backup").join("GameA");
+    std::fs::create_dir_all(&game_a_dir).expect("failed to create game_a_dir");
+    std::fs::create_dir_all(&game_b_dir).expect("failed to create game_b_dir");
+    std::fs::create_dir_all(&game_c_dir).expect("failed to create game_c_dir");
+
+    let db_path = temp_root.join("vault_db");
+    std::fs::create_dir_all(&db_path).expect("failed to create db dir");
+
+    let game_a_str = game_a_dir.to_string_lossy().to_string();
+    let game_c_str = game_c_dir.to_string_lossy().to_string();
+
+    let (created_game_id, created_asset_a_id, created_asset_c_id) = {
+        let db = Arc::new(LoomaDb::open(&db_path).expect("open db failed"));
+        let core = LoomaCore::new(db.clone());
+
+        // Test 1: Link Unindexed Directory -> creates real AssetKind::Directory and Relation
+        let game = core.create_work(
+            "test",
+            "Elden Ring",
+            WorkType::Game,
+            RecordStatus::InProgress,
+            None,
+            None,
+        ).expect("failed to create game");
+
+        let (asset_a, rel_a) = core.link_work_directory("test", &game.id, &game_a_str)
+            .expect("failed to link unindexed directory");
+
+        assert_eq!(asset_a.kind, AssetKind::Directory);
+        assert_eq!(asset_a.status, AssetStatus::Active);
+        assert_eq!(rel_a.source_id, game.id);
+        assert_eq!(rel_a.target_id, asset_a.id);
+
+        // Verify target asset actually exists in database
+        let fetched_asset = core.get_asset(&asset_a.id).expect("get_asset failed").expect("asset should exist");
+        assert_eq!(fetched_asset.id, asset_a.id);
+
+        // Test 2 & 3: Idempotent ensure_directory_asset & Path normalization
+        let slash_variant = format!("{}/", game_a_str.replace('/', "\\"));
+        let asset_a_again = core.ensure_directory_asset("test", &slash_variant)
+            .expect("ensure directory idempotent failed");
+        assert_eq!(asset_a_again.id, asset_a.id, "same path should return exact same asset");
+
+        // Test 4: Multiple Locations for the same Game
+        let (asset_c, _rel_c) = core.link_work_directory("test", &game.id, &game_c_str)
+            .expect("failed to link second location");
+        assert_ne!(asset_a.id, asset_c.id);
+
+        let summary = core.get_work_summary(&game.id).expect("summary failed").unwrap();
+        assert_eq!(summary.linked_assets.len(), 2);
+        assert!(summary.linked_assets.iter().any(|a| a.id == asset_a.id));
+        assert!(summary.linked_assets.iter().any(|a| a.id == asset_c.id));
+
+        // Test 8: Data Integrity Invariant - No Orphan Relations
+        let fake_asset_id = "asset_dir_nonexistent_12345";
+        let orphan_attempt = core.link_work_asset("test", &game.id, fake_asset_id, None);
+        assert!(orphan_attempt.is_err(), "Linking nonexistent asset MUST fail");
+
+        // Test Case C: Nonexistent directory path fails
+        let nonexistent_path = temp_root.join("NonexistentDir_XYZ").to_string_lossy().to_string();
+        let nonexist_attempt = core.ensure_directory_asset("test", &nonexistent_path);
+        assert!(nonexist_attempt.is_err(), "Ensuring nonexistent path MUST fail");
+
+        (game.id, asset_a.id, asset_c.id)
+    };
+
+    // Test 6: Restart Persistence (reopen DB from disk)
+    {
+        let db = Arc::new(LoomaDb::open(&db_path).expect("reopen db failed"));
+        let core = LoomaCore::new(db.clone());
+
+        let games = core.list_works(Some("game"), None).expect("list works failed");
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].id, created_game_id);
+
+        let summary = core.get_work_summary(&created_game_id).expect("summary failed").unwrap();
+        assert_eq!(summary.linked_assets.len(), 2);
+        assert!(summary.linked_assets.iter().any(|a| a.id == created_asset_a_id));
+        assert!(summary.linked_assets.iter().any(|a| a.id == created_asset_c_id));
+
+        // Test 7: Missing Directory Detection
+        // Remove game_a_dir from disk to simulate missing/disconnected drive
+        std::fs::remove_dir_all(&game_a_dir).expect("failed to remove game_a_dir");
+
+        let summary_after_remove = core.get_work_summary(&created_game_id).expect("summary failed").unwrap();
+        // Work still exists!
+        assert_eq!(summary_after_remove.entity.id, created_game_id);
+        // Relations still exist!
+        assert_eq!(summary_after_remove.linked_assets.len(), 2);
+        // The deleted directory is marked as Missing!
+        let missing_asset = summary_after_remove.linked_assets.iter().find(|a| a.id == created_asset_a_id)
+            .expect("asset a should still be linked");
+        assert_eq!(missing_asset.status, AssetStatus::Missing);
+
+        // Intact directory remains Active
+        let active_asset = summary_after_remove.linked_assets.iter().find(|a| a.id == created_asset_c_id)
+            .expect("asset c should still be linked");
+        assert_eq!(active_asset.status, AssetStatus::Active);
+    }
+
+    // Cleanup test temp directory
+    let _ = std::fs::remove_dir_all(&temp_root);
+}

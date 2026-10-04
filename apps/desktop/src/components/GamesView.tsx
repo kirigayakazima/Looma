@@ -214,18 +214,10 @@ export const GamesView: React.FC<GamesViewProps> = ({
       });
 
       if (newWork) {
-        // Link directory asset if exists or create relation
-        const existingAsset = assets.find((a) => a.path === cand.path);
-        const assetId = existingAsset ? existingAsset.id : `asset_dir_${cand.id}`;
-
-        await safeInvoke('create_relation', {
-          relation: {
-            id: `rel_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            source_id: newWork.id,
-            target_id: assetId,
-            relation_type: 'attaches',
-            description: cand.path,
-          },
+        // Transactionally ensure Directory Asset and link to work via LoomaCore
+        await safeInvoke('link_work_directory', {
+          workId: newWork.id,
+          path: cand.path,
         });
 
         // Remove from candidates list
@@ -241,17 +233,10 @@ export const GamesView: React.FC<GamesViewProps> = ({
   // Link candidate to an existing game
   const handleLinkCandidateToGame = async (cand: GameCandidate, targetGameId: string) => {
     try {
-      const existingAsset = assets.find((a) => a.path === cand.path);
-      const assetId = existingAsset ? existingAsset.id : `asset_dir_${cand.id}`;
-
-      await safeInvoke('create_relation', {
-        relation: {
-          id: `rel_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          source_id: targetGameId,
-          target_id: assetId,
-          relation_type: 'attaches',
-          description: cand.path,
-        },
+      // Transactionally ensure Directory Asset and link to target work via LoomaCore
+      await safeInvoke('link_work_directory', {
+        workId: targetGameId,
+        path: cand.path,
       });
 
       setCandidates((prev) => prev.filter((c) => c.id !== cand.id));
@@ -281,15 +266,10 @@ export const GamesView: React.FC<GamesViewProps> = ({
       });
 
       if (created && newLocalPath.trim()) {
-        const dummyAssetId = `asset_${Date.now()}`;
-        await safeInvoke('create_relation', {
-          relation: {
-            id: `rel_${Date.now()}`,
-            source_id: created.id,
-            target_id: dummyAssetId,
-            relation_type: 'attaches',
-            description: newLocalPath.trim(),
-          },
+        // Transactionally ensure Directory Asset and link to created work via LoomaCore
+        await safeInvoke('link_work_directory', {
+          workId: created.id,
+          path: newLocalPath.trim(),
         });
       }
 
@@ -356,6 +336,29 @@ export const GamesView: React.FC<GamesViewProps> = ({
     });
     const updated = await safeInvoke<WorkSummary>('get_work_summary', { id: activeGameId });
     if (updated) setActiveSummary(updated);
+    if (onRefreshAll) onRefreshAll();
+  };
+
+  // Relocate missing directory asset to a new location without losing work
+  const handleRelocateAsset = async (oldAssetId: string) => {
+    if (!activeGameId) return;
+    const picked = await safeInvoke<string>('pick_folder');
+    if (picked) {
+      const res = await safeInvoke('link_work_directory', {
+        workId: activeGameId,
+        path: picked,
+      });
+      if (res) {
+        await safeInvoke('delete_relation_between', {
+          sourceId: activeGameId,
+          targetId: oldAssetId,
+        });
+        const updated = await safeInvoke<WorkSummary>('get_work_summary', { id: activeGameId });
+        if (updated) setActiveSummary(updated);
+        await loadGames();
+        if (onRefreshAll) onRefreshAll();
+      }
+    }
   };
 
   // Extract drives and stats
@@ -869,52 +872,90 @@ export const GamesView: React.FC<GamesViewProps> = ({
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {activeSummary.linked_assets.map((ast) => (
-                        <div
-                          key={ast.id}
-                          className="p-2.5 rounded-lg bg-neutral-900 border border-neutral-800 flex items-center justify-between gap-2 text-xs"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5 text-neutral-200 font-mono text-[11px] truncate">
-                              <Folder className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                              <span className="truncate">{ast.path || ast.id}</span>
-                            </div>
-                            {ast.size && (
-                              <div className="text-[10px] text-neutral-500 mt-0.5">
-                                {(ast.size / (1024 * 1024 * 1024)).toFixed(2)} GB
+                      {activeSummary.linked_assets.map((ast) => {
+                        const isMissing = ast.status === 'missing';
+                        return (
+                          <div
+                            key={ast.id}
+                            className={`p-2.5 rounded-lg flex items-center justify-between gap-2 text-xs transition-colors ${
+                              isMissing
+                                ? 'bg-amber-950/20 border border-amber-800/60'
+                                : 'bg-neutral-900 border border-neutral-800'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5 font-mono text-[11px] truncate">
+                                {isMissing ? (
+                                  <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                ) : (
+                                  <Folder className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                )}
+                                <span
+                                  className={`truncate ${
+                                    isMissing ? 'text-amber-200 line-through decoration-amber-500/50' : 'text-neutral-200'
+                                  }`}
+                                >
+                                  {ast.path || ast.id}
+                                </span>
+                                {isMissing && (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-sans font-medium border border-amber-500/30 shrink-0">
+                                    目录失效 / 离线
+                                  </span>
+                                )}
                               </div>
-                            )}
-                          </div>
+                              {isMissing ? (
+                                <div className="text-[10px] text-amber-400/80 mt-0.5">
+                                  此本地路径不可访问或移动硬盘未连接，作品及游玩进度不受影响
+                                </div>
+                              ) : ast.size ? (
+                                <div className="text-[10px] text-neutral-500 mt-0.5">
+                                  {(ast.size / (1024 * 1024 * 1024)).toFixed(2)} GB
+                                </div>
+                              ) : null}
+                            </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {ast.kind === 'image' && (
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {isMissing ? (
+                                <button
+                                  onClick={() => handleRelocateAsset(ast.id)}
+                                  className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-[11px] border border-amber-500/40 cursor-pointer font-medium transition-colors"
+                                  title="选择新的有效目录重新关联"
+                                >
+                                  重新定位
+                                </button>
+                              ) : (
+                                <>
+                                  {ast.kind === 'image' && (
+                                    <button
+                                      onClick={() => handleSetCoverAsset(activeSummary.entity.id, ast.id)}
+                                      className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-emerald-400 text-[11px] cursor-pointer"
+                                      title="设为此游戏卡片封面"
+                                    >
+                                      设为封面
+                                    </button>
+                                  )}
+                                  {ast.path && (
+                                    <button
+                                      onClick={() => handleOpenPath(ast.path!)}
+                                      className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[11px] cursor-pointer"
+                                      title="打开文件资源管理器"
+                                    >
+                                      打开
+                                    </button>
+                                  )}
+                                </>
+                              )}
                               <button
-                                onClick={() => handleSetCoverAsset(activeSummary.entity.id, ast.id)}
-                                className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-emerald-400 text-[11px] cursor-pointer"
-                                title="设为此游戏卡片封面"
+                                onClick={() => handleUnlinkAsset(ast.id)}
+                                className="p-1 rounded hover:bg-neutral-800 text-neutral-500 hover:text-rose-400 transition-colors"
+                                title="解除关联"
                               >
-                                设为封面
+                                <Trash2 className="w-3.5 h-3.5" />
                               </button>
-                            )}
-                            {ast.path && (
-                              <button
-                                onClick={() => handleOpenPath(ast.path!)}
-                                className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[11px] cursor-pointer"
-                                title="打开文件资源管理器"
-                              >
-                                打开
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleUnlinkAsset(ast.id)}
-                              className="p-1 rounded hover:bg-neutral-800 text-neutral-500 hover:text-rose-400 transition-colors"
-                              title="解除关联"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>

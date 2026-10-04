@@ -412,6 +412,26 @@ fn update_work_cover_asset(
 }
 
 #[tauri::command]
+fn ensure_directory_asset(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Asset, String> {
+    state.core.ensure_directory_asset("desktop", &path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn link_work_directory(
+    work_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Asset, String> {
+    let (asset, _) = state.core.link_work_directory("desktop", &work_id, &path)
+        .map_err(|e| e.to_string())?;
+    Ok(asset)
+}
+
+#[tauri::command]
 fn detect_game_candidates(
     root_path: String,
     state: State<'_, AppState>,
@@ -563,6 +583,8 @@ pub fn run() {
             update_work_status,
             update_work_progress,
             update_work_cover_asset,
+            ensure_directory_asset,
+            link_work_directory,
             detect_game_candidates,
             open_external_url
         ])

@@ -484,6 +484,29 @@ impl McpServer {
                     "required": ["entity_id", "provider", "url"]
                 }
             }),
+            json!({
+                "name": "ensure_directory_asset",
+                "description": "[MetadataWrite] Ensure a directory path is registered as a Directory Asset in the vault",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Filesystem directory path" }
+                    },
+                    "required": ["path"]
+                }
+            }),
+            json!({
+                "name": "link_work_directory",
+                "description": "[MetadataWrite] Ensure a directory asset and link it to a work entity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "work_id": { "type": "string", "description": "Work Entity ID" },
+                        "path": { "type": "string", "description": "Filesystem directory path" }
+                    },
+                    "required": ["work_id", "path"]
+                }
+            }),
 
             // Content write tools
             json!({
@@ -845,6 +868,22 @@ impl McpServer {
                 };
                 self.core.create_external_reference("mcp", &ext_ref).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&ext_ref).map_err(|e| e.to_string())
+            }
+
+            "ensure_directory_asset" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "ensure_directory_asset")?;
+                let path = args.get("path").and_then(|v| v.as_str()).ok_or("Missing path")?;
+                let asset = self.core.ensure_directory_asset("mcp", path).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&asset).map_err(|e| e.to_string())
+            }
+
+            "link_work_directory" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "link_work_directory")?;
+                let work_id = args.get("work_id").and_then(|v| v.as_str()).ok_or("Missing work_id")?;
+                let path = args.get("path").and_then(|v| v.as_str()).ok_or("Missing path")?;
+                let (asset, rel) = self.core.link_work_directory("mcp", work_id, path).map_err(|e| e.to_string())?;
+                let res = json!({ "asset": asset, "relation": rel });
+                serde_json::to_string_pretty(&res).map_err(|e| e.to_string())
             }
 
             // Content write tools

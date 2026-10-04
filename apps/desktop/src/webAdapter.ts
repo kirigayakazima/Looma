@@ -828,6 +828,54 @@ class WebVaultService {
     };
   }
 
+  public ensureDirectoryAsset(rawPath: string): Asset {
+    const normalized = rawPath.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
+    const existing = this.store.assets.find((a) => a.path?.toLowerCase() === normalized.toLowerCase());
+    if (existing) return existing;
+
+    const dirName = normalized.split('/').pop() || normalized;
+    const drive = normalized.length >= 2 && normalized[1] === ':' ? normalized.substring(0, 2).toUpperCase() : 'Local';
+    const now = new Date().toISOString();
+    const newAsset: Asset = {
+      id: `asset_dir_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      kind: 'directory',
+      source: 'local',
+      path: normalized,
+      size: 45 * 1024 * 1024 * 1024,
+      hash: null,
+      mime_type: 'inode/directory',
+      metadata: { directory_name: dirName, drive },
+      status: 'active',
+      created_at: now,
+      modified_at: now,
+      indexed_at: now,
+    };
+    this.store.assets.unshift(newAsset);
+    this.saveStore();
+    return newAsset;
+  }
+
+  public linkWorkDirectory(workId: string, rawPath: string): Asset {
+    const asset = this.ensureDirectoryAsset(rawPath);
+    const existingRel = this.store.relations.find(
+      (r) => (r.source_id === workId && r.target_id === asset.id) || (r.source_id === asset.id && r.target_id === workId)
+    );
+    if (!existingRel) {
+      this.store.relations.unshift({
+        id: `rel_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        source_id: workId,
+        source_type: 'entity',
+        relation_type: 'attaches',
+        target_id: asset.id,
+        target_type: 'asset',
+        metadata: { domain: 'personal_records' },
+        created_at: new Date().toISOString(),
+      });
+      this.saveStore();
+    }
+    return asset;
+  }
+
   public listMemories(): Memory[] {
     return [...this.store.memories];
   }
@@ -995,6 +1043,10 @@ export function initWebMockAdapter() {
         return webVault.updateWorkProgress(args.id, args.position, args.positionType, args.totalPositions, args.unit);
       case 'update_work_cover_asset':
         return webVault.updateWorkCoverAsset(args.id, args.coverAssetId);
+      case 'ensure_directory_asset':
+        return webVault.ensureDirectoryAsset(args.path);
+      case 'link_work_directory':
+        return webVault.linkWorkDirectory(args.workId || args.work_id, args.path);
       case 'detect_game_candidates':
         return [
           {

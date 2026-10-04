@@ -41,6 +41,31 @@ impl<T> VaultRepository for T where
 {
 }
 
+/// Normalizes a directory path string for stable cross-platform deduplication and storage.
+pub fn normalize_directory_path(raw: &str) -> String {
+    let s = raw.trim();
+    // Replace all backslashes with forward slashes
+    let mut normalized = s.replace('\\', "/");
+    // Strip Windows extended-length prefix \\?\ or //?/
+    if let Some(stripped) = normalized.strip_prefix("//?/") {
+        normalized = stripped.to_string();
+    }
+    // Remove duplicate slashes
+    while normalized.contains("//") {
+        normalized = normalized.replace("//", "/");
+    }
+    // Uppercase drive letter on Windows (e.g. "e:/..." -> "E:/...")
+    if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
+        let drive = normalized[0..1].to_ascii_uppercase();
+        normalized = format!("{}{}", drive, &normalized[1..]);
+    }
+    // Trim trailing slash unless it's root like "E:/" or "/"
+    if normalized.len() > 3 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
 /// The unified Core Application Facade for Looma.
 /// Desktop, CLI, and MCP MUST interact with this facade instead of directly manipulating database or internal state.
 #[derive(Clone)]
@@ -463,7 +488,17 @@ impl LoomaCore {
             };
 
             if other_type == "asset" {
-                if let Ok(Some(asset)) = self.get_asset(other_id) {
+                if let Ok(Some(mut asset)) = self.get_asset(other_id) {
+                    if let Some(ref p) = asset.path {
+                        let exists = Path::new(p).exists();
+                        if !exists && asset.status == AssetStatus::Active {
+                            asset.status = AssetStatus::Missing;
+                            let _ = self.repo.upsert_asset(&asset);
+                        } else if exists && asset.status == AssetStatus::Missing {
+                            asset.status = AssetStatus::Active;
+                            let _ = self.repo.upsert_asset(&asset);
+                        }
+                    }
                     linked_assets.push(asset);
                 }
             } else if other_type == "memory" {
@@ -502,11 +537,34 @@ impl LoomaCore {
         asset_id: &str,
         relation_type: Option<&str>,
     ) -> LoomaResult<Relation> {
+        // Enforce Data Integrity Invariant: target asset and source work must exist
+        if self.get_asset(asset_id)?.is_none() {
+            return Err(LoomaError::NotFound(format!(
+                "Cannot link nonexistent asset: {asset_id}"
+            )));
+        }
+        if self.get_entity(work_id)?.is_none() {
+            return Err(LoomaError::NotFound(format!(
+                "Cannot link nonexistent work entity: {work_id}"
+            )));
+        }
+
+        let r_type = relation_type.unwrap_or(relation_types::ATTACHES);
+        let existing = self.list_relations_for_item(work_id)?;
+        if let Some(r) = existing.into_iter().find(|r| {
+            r.relation_type == r_type && (
+                (r.source_id == work_id && r.target_id == asset_id) ||
+                (r.source_id == asset_id && r.target_id == work_id)
+            )
+        }) {
+            return Ok(r);
+        }
+
         let rel = Relation {
             id: format!("rel_{}", &Uuid::new_v4().to_string()[..8]),
             source_id: work_id.to_string(),
             source_type: "entity".to_string(),
-            relation_type: relation_type.unwrap_or(relation_types::ATTACHES).to_string(),
+            relation_type: r_type.to_string(),
             target_id: asset_id.to_string(),
             target_type: "asset".to_string(),
             metadata: json!({ "domain": "personal_records" }),
@@ -514,6 +572,80 @@ impl LoomaCore {
         };
         self.create_relation(actor, &rel)?;
         Ok(rel)
+    }
+
+    pub fn ensure_directory_asset(
+        &self,
+        actor: &str,
+        raw_path: &str,
+    ) -> LoomaResult<Asset> {
+        let norm_path = normalize_directory_path(raw_path);
+        if norm_path.is_empty() {
+            return Err(LoomaError::Validation("Directory path cannot be empty".to_string()));
+        }
+
+        // Case A: Asset already exists in database
+        if let Some(existing) = self.get_asset_by_path(&norm_path)? {
+            return Ok(existing);
+        }
+
+        // Case C: Path does not exist on disk or is not a directory
+        let p = Path::new(&norm_path);
+        if !p.exists() {
+            return Err(LoomaError::Validation(format!(
+                "Directory path does not exist: {norm_path}"
+            )));
+        }
+        if !p.is_dir() {
+            return Err(LoomaError::Validation(format!(
+                "Path is not a directory: {norm_path}"
+            )));
+        }
+
+        // Case B: Create new Directory Asset
+        let dir_name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| norm_path.clone());
+
+        let drive = if norm_path.len() >= 2 && &norm_path[1..2] == ":" {
+            norm_path[0..2].to_uppercase()
+        } else {
+            "Local".to_string()
+        };
+
+        let now = Utc::now();
+        let new_asset = Asset {
+            id: Uuid::new_v4().to_string(),
+            kind: AssetKind::Directory,
+            source: AssetSource::Local,
+            path: Some(norm_path.clone()),
+            size: None,
+            hash: None,
+            mime_type: Some("inode/directory".to_string()),
+            metadata: json!({
+                "directory_name": dir_name,
+                "drive": drive,
+            }),
+            status: AssetStatus::Active,
+            created_at: now,
+            modified_at: now,
+            indexed_at: now,
+        };
+
+        self.upsert_asset(actor, &new_asset)?;
+        Ok(new_asset)
+    }
+
+    pub fn link_work_directory(
+        &self,
+        actor: &str,
+        work_id: &str,
+        dir_path: &str,
+    ) -> LoomaResult<(Asset, Relation)> {
+        let asset = self.ensure_directory_asset(actor, dir_path)?;
+        let rel = self.link_work_asset(actor, work_id, &asset.id, Some(relation_types::ATTACHES))?;
+        Ok((asset, rel))
     }
 
     pub fn link_work_memory(
