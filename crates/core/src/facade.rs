@@ -319,25 +319,13 @@ impl LoomaCore {
                 serde_json::from_value(w.clone()).unwrap_or_else(|_| WorkMetadata {
                     work_type: WorkType::parse(&entity.entity_type),
                     status: RecordStatus::InProgress,
-                    original_title: None,
-                    release_year: None,
-                    start_date: None,
-                    end_date: None,
-                    cover_asset_id: None,
-                    rating: None,
-                    progress: None,
+                    ..Default::default()
                 })
             } else {
                 WorkMetadata {
                     work_type: WorkType::parse(&entity.entity_type),
                     status: RecordStatus::InProgress,
-                    original_title: None,
-                    release_year: None,
-                    start_date: None,
-                    end_date: None,
-                    cover_asset_id: None,
-                    rating: None,
-                    progress: None,
+                    ..Default::default()
                 }
             };
 
@@ -646,6 +634,58 @@ impl LoomaCore {
         let asset = self.ensure_directory_asset(actor, dir_path)?;
         let rel = self.link_work_asset(actor, work_id, &asset.id, Some(relation_types::ATTACHES))?;
         Ok((asset, rel))
+    }
+
+    /// Atomically relocates a work's directory asset to a new filesystem path without modifying the Work identity.
+    pub fn relocate_work_directory(
+        &self,
+        actor: &str,
+        work_id: &str,
+        old_asset_id: &str,
+        new_dir_path: &str,
+    ) -> LoomaResult<(Asset, Relation)> {
+        let (new_asset, new_rel) = self.link_work_directory(actor, work_id, new_dir_path)?;
+        let _ = self.delete_relation_between(actor, work_id, old_asset_id);
+        let _ = self.delete_relation_between(actor, old_asset_id, work_id);
+        self.record_audit(
+            actor,
+            "work.relocate_directory",
+            "entity",
+            work_id,
+            "success",
+            json!({
+                "old_asset_id": old_asset_id,
+                "new_asset_id": new_asset.id,
+                "new_path": new_asset.path,
+            }),
+        )?;
+        Ok((new_asset, new_rel))
+    }
+
+    /// Update type-specific metadata overlay on a Work entity
+    pub fn update_work_type_metadata(
+        &self,
+        actor: &str,
+        entity_id: &str,
+        meta: Option<TypeSpecificMetadata>,
+    ) -> LoomaResult<Entity> {
+        let mut entity = self.get_entity(entity_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity not found: {entity_id}")))?;
+        entity.set_type_metadata(meta.clone());
+        self.update_entity(actor, &entity)?;
+        self.record_audit(
+            actor,
+            "work.type_metadata_update",
+            "entity",
+            entity_id,
+            "success",
+            json!({ "type_metadata": meta }),
+        )?;
+        self.emit_event(
+            actor,
+            DomainEvent::EntityUpdated { id: entity_id.to_string() },
+        );
+        Ok(entity)
     }
 
     pub fn link_work_memory(

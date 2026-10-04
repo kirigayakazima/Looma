@@ -496,6 +496,21 @@ impl McpServer {
                 }
             }),
             json!({
+                "name": "create_work",
+                "description": "[MetadataWrite] Register a new Work entity across any cultural medium (game, anime, manga, book, movie, tv_series, project, etc.)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Work title" },
+                        "work_type": { "type": "string", "description": "Medium type: game | anime | manga | book | movie | tv_series | music | project | other" },
+                        "status": { "type": "string", "description": "Status: planned | in_progress | completed | paused | dropped | revisit" },
+                        "original_title": { "type": "string", "description": "Optional native original title" },
+                        "description": { "type": "string", "description": "Optional synopsis or description" }
+                    },
+                    "required": ["title", "work_type"]
+                }
+            }),
+            json!({
                 "name": "link_work_directory",
                 "description": "[MetadataWrite] Ensure a directory asset and link it to a work entity",
                 "inputSchema": {
@@ -505,6 +520,19 @@ impl McpServer {
                         "path": { "type": "string", "description": "Filesystem directory path" }
                     },
                     "required": ["work_id", "path"]
+                }
+            }),
+            json!({
+                "name": "relocate_work_directory",
+                "description": "[MetadataWrite] Relocate a work's directory asset to a new filesystem path without losing Work identity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "work_id": { "type": "string", "description": "Work Entity ID" },
+                        "old_asset_id": { "type": "string", "description": "ID of previous/missing directory asset" },
+                        "new_path": { "type": "string", "description": "New filesystem directory path" }
+                    },
+                    "required": ["work_id", "old_asset_id", "new_path"]
                 }
             }),
 
@@ -769,6 +797,7 @@ impl McpServer {
                         cover_asset_id: None,
                         rating: args.get("rating").and_then(|v| v.as_f64()).map(|f| f as f32),
                         progress: None,
+                        type_metadata: None,
                     });
                 }
 
@@ -877,11 +906,36 @@ impl McpServer {
                 serde_json::to_string_pretty(&asset).map_err(|e| e.to_string())
             }
 
+            "create_work" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "create_work")?;
+                let title = args.get("title").and_then(|v| v.as_str()).ok_or("Missing title")?;
+                let work_type_str = args.get("work_type").and_then(|v| v.as_str()).ok_or("Missing work_type")?;
+                let status_str = args.get("status").and_then(|v| v.as_str()).unwrap_or("planned");
+                let orig_title = args.get("original_title").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let desc = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                let work_type = WorkType::parse(work_type_str);
+                let status = RecordStatus::parse(status_str);
+
+                let work = self.core.create_work("mcp", title, work_type, status, orig_title, desc).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&work).map_err(|e| e.to_string())
+            }
+
             "link_work_directory" => {
                 self.check_permission(McpPermissionLevel::MetadataWrite, "link_work_directory")?;
                 let work_id = args.get("work_id").and_then(|v| v.as_str()).ok_or("Missing work_id")?;
                 let path = args.get("path").and_then(|v| v.as_str()).ok_or("Missing path")?;
                 let (asset, rel) = self.core.link_work_directory("mcp", work_id, path).map_err(|e| e.to_string())?;
+                let res = json!({ "asset": asset, "relation": rel });
+                serde_json::to_string_pretty(&res).map_err(|e| e.to_string())
+            }
+
+            "relocate_work_directory" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "relocate_work_directory")?;
+                let work_id = args.get("work_id").and_then(|v| v.as_str()).ok_or("Missing work_id")?;
+                let old_asset_id = args.get("old_asset_id").and_then(|v| v.as_str()).ok_or("Missing old_asset_id")?;
+                let new_path = args.get("new_path").and_then(|v| v.as_str()).ok_or("Missing new_path")?;
+                let (asset, rel) = self.core.relocate_work_directory("mcp", work_id, old_asset_id, new_path).map_err(|e| e.to_string())?;
                 let res = json!({ "asset": asset, "relation": rel });
                 serde_json::to_string_pretty(&res).map_err(|e| e.to_string())
             }

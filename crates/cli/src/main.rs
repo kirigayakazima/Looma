@@ -252,6 +252,15 @@ enum WorkCommands {
         #[arg(help = "Filesystem directory path")]
         path: PathBuf,
     },
+    #[command(about = "Relocate a work's directory asset to a new filesystem path")]
+    RelocateDir {
+        #[arg(help = "Work Entity ID")]
+        work_id: String,
+        #[arg(help = "Old Asset ID to replace")]
+        old_asset_id: String,
+        #[arg(help = "New directory path")]
+        new_path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -584,6 +593,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  Asset ID: {}", asset.id);
                 println!("  Path:     {}", asset.path.unwrap_or_default());
                 println!("  Relation: {} [{}]", rel.id, rel.relation_type);
+            }
+            WorkCommands::RelocateDir { work_id, old_asset_id, new_path } => {
+                let path_str = new_path.to_string_lossy();
+                let (asset, rel) = core.relocate_work_directory("cli", &work_id, &old_asset_id, &path_str)?;
+                println!("Successfully relocated work directory asset:");
+                println!("  Work ID:      {}", work_id);
+                println!("  Old Asset ID: {}", old_asset_id);
+                println!("  New Asset ID: {}", asset.id);
+                println!("  New Path:     {}", asset.path.unwrap_or_default());
+                println!("  New Relation: {} [{}]", rel.id, rel.relation_type);
             }
         },
 

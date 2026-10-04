@@ -432,6 +432,18 @@ fn link_work_directory(
 }
 
 #[tauri::command]
+fn relocate_work_directory(
+    work_id: String,
+    old_asset_id: String,
+    new_path: String,
+    state: State<'_, AppState>,
+) -> Result<Asset, String> {
+    let (asset, _) = state.core.relocate_work_directory("desktop", &work_id, &old_asset_id, &new_path)
+        .map_err(|e| e.to_string())?;
+    Ok(asset)
+}
+
+#[tauri::command]
 fn detect_game_candidates(
     root_path: String,
     state: State<'_, AppState>,
@@ -585,6 +597,7 @@ pub fn run() {
             update_work_cover_asset,
             ensure_directory_asset,
             link_work_directory,
+            relocate_work_directory,
             detect_game_candidates,
             open_external_url
         ])

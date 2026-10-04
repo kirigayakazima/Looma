@@ -425,3 +425,330 @@ fn test_game_library_patch_data_integrity_and_directory_assets() {
     // Cleanup test temp directory
     let _ = std::fs::remove_dir_all(&temp_root);
 }
+
+#[test]
+fn test_anime_work_lifecycle_without_local_asset() {
+    // Verifies Guardrails Section 4, 30: Work can exist purely as a digital record without any local asset.
+    let db = Arc::new(LoomaDb::in_memory().expect("in-memory db init failed"));
+    let core = LoomaCore::new(db.clone());
+
+    // 1. Create Anime Work (Frieren) with no local assets
+    let anime = core.create_work(
+        "test-suite",
+        "葬送的芙莉莲",
+        WorkType::Anime,
+        RecordStatus::InProgress,
+        Some("葬送のフリーレン".to_string()),
+        Some("千年精灵魔法使追寻生命意义的旅行".to_string()),
+    ).expect("failed to create anime work");
+
+    // 2. Set type-specific metadata (season, studio)
+    let anime_meta = TypeSpecificMetadata::Anime(AnimeSpecificMeta {
+        season: Some("2023-10".to_string()),
+        total_episodes: Some(28),
+        anime_format: Some("tv".to_string()),
+        studio: Some("Madhouse".to_string()),
+        broadcast_day: Some("Friday".to_string()),
+    });
+    core.update_work_type_metadata("test-suite", &anime.id, Some(anime_meta.clone()))
+        .expect("update type metadata failed");
+
+    // 3. Add ExternalReference (Bangumi & Official website)
+    let ref_bgm = ExternalReference {
+        id: "ref-frieren-bgm".to_string(),
+        entity_id: Some(anime.id.clone()),
+        provider: "bangumi".to_string(),
+        title: "Bangumi 条目".to_string(),
+        url: "https://bgm.tv/subject/399999".to_string(),
+        description: None,
+        metadata: json!({"score": 8.9}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    core.create_external_reference("test-suite", &ref_bgm).expect("create ext ref failed");
+
+    // 4. Update Progress to Episode 16
+    core.update_work_progress(
+        "test-suite",
+        &anime.id,
+        16.0,
+        Some(ProgressPositionType::Episode),
+        Some(28.0),
+        Some("集".to_string()),
+    ).expect("update progress failed");
+
+    // 5. Add Memory note
+    let note = Memory {
+        id: "mem-frieren-01".to_string(),
+        title: "第16集观后感：长寿种与短命种的羁绊".to_string(),
+        content: "克拉夫特与芙莉莲在暴风雪木屋中的长谈太具有神性了。".to_string(),
+        category: Some("anime_review".to_string()),
+        metadata: json!({"rating": 9.8}),
+        recorded_at: Utc::now(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    core.create_memory("test-suite", &note).expect("create memory failed");
+    core.link_work_memory("test-suite", &anime.id, &note.id).expect("link memory failed");
+
+    // 6. Assert complete WorkProfile
+    let summary = core.get_work_summary(&anime.id).expect("get summary failed").unwrap();
+    assert_eq!(summary.entity.title, "葬送的芙莉莲");
+    assert_eq!(summary.entity.entity_type, "anime");
+
+    // Invariant: Zero local assets
+    assert_eq!(summary.linked_assets.len(), 0, "Work without local assets MUST have 0 assets");
+
+    // Invariant: Progress, references, memories all present
+    let work_meta = summary.work_metadata.expect("work_metadata must exist");
+    assert_eq!(work_meta.work_type, WorkType::Anime);
+    assert_eq!(work_meta.status, RecordStatus::InProgress);
+    assert_eq!(work_meta.type_metadata, Some(anime_meta));
+
+    let progress = work_meta.progress.expect("progress must exist");
+    assert_eq!(progress.position, 16.0);
+    assert_eq!(progress.total_positions, Some(28.0));
+    assert_eq!(progress.unit.as_deref(), Some("集"));
+
+    assert_eq!(summary.external_references.len(), 1);
+    assert_eq!(summary.external_references[0].provider, "bangumi");
+
+    assert_eq!(summary.linked_memories.len(), 1);
+    assert_eq!(summary.linked_memories[0].title, "第16集观后感：长寿种与短命种的羁绊");
+}
+
+#[test]
+fn test_manga_work_lifecycle_with_unknown_total() {
+    // Verifies Guardrails Section 7: Ongoing works with total_positions = None (serialized manga)
+    let db = Arc::new(LoomaDb::in_memory().expect("in-memory db init failed"));
+    let core = LoomaCore::new(db.clone());
+
+    // 1. Create Manga Work (Chainsaw Man Part 2)
+    let manga = core.create_work(
+        "test-suite",
+        "电锯人 第二部",
+        WorkType::Manga,
+        RecordStatus::InProgress,
+        Some("チェンソーマン 第二部".to_string()),
+        Some("藤本树连载中的黑暗奇幻少年漫画".to_string()),
+    ).expect("failed to create manga work");
+
+    let manga_meta = TypeSpecificMetadata::Manga(MangaSpecificMeta {
+        total_volumes: Some(18),
+        total_chapters: None, // ongoing, unknown total
+        author: Some("藤本树".to_string()),
+        magazine: Some("少年JUMP+".to_string()),
+    });
+    core.update_work_type_metadata("test-suite", &manga.id, Some(manga_meta.clone()))
+        .expect("update type metadata failed");
+
+    // 2. Track ongoing progress without total
+    core.update_work_progress(
+        "test-suite",
+        &manga.id,
+        142.0,
+        Some(ProgressPositionType::Chapter),
+        None, // total_positions is explicitly None!
+        Some("话".to_string()),
+    ).expect("update progress failed");
+
+    // 3. Step forward +1 (143话)
+    core.update_work_progress(
+        "test-suite",
+        &manga.id,
+        143.0,
+        Some(ProgressPositionType::Chapter),
+        None,
+        Some("话".to_string()),
+    ).expect("step progress failed");
+
+    let summary = core.get_work_summary(&manga.id).expect("get summary failed").unwrap();
+    let meta = summary.work_metadata.unwrap();
+    assert_eq!(meta.work_type, WorkType::Manga);
+    assert_eq!(meta.type_metadata, Some(manga_meta));
+
+    let prog = meta.progress.unwrap();
+    assert_eq!(prog.position, 143.0);
+    assert_eq!(prog.total_positions, None, "Ongoing serialized manga total positions must remain None");
+    assert_eq!(prog.unit.as_deref(), Some("话"));
+}
+
+#[test]
+fn test_book_work_lifecycle_and_type_metadata() {
+    // Verifies Book type with ISBN, author, translator, and page tracking
+    let db = Arc::new(LoomaDb::in_memory().expect("in-memory db init failed"));
+    let core = LoomaCore::new(db.clone());
+
+    let book = core.create_work(
+        "test-suite",
+        "Rust程序设计",
+        WorkType::Book,
+        RecordStatus::InProgress,
+        Some("Programming Rust 2nd Edition".to_string()),
+        None,
+    ).expect("failed to create book");
+
+    let book_meta = TypeSpecificMetadata::Book(BookSpecificMeta {
+        isbn: Some("9787111685876".to_string()),
+        author: Some("Jim Blandy, Jason Orendorff".to_string()),
+        translator: Some("陈小杰".to_string()),
+        publisher: Some("机械工业出版社".to_string()),
+        total_pages: Some(650),
+    });
+    core.update_work_type_metadata("test-suite", &book.id, Some(book_meta.clone())).unwrap();
+
+    core.update_work_progress(
+        "test-suite",
+        &book.id,
+        280.0,
+        Some(ProgressPositionType::Page),
+        Some(650.0),
+        Some("页".to_string()),
+    ).unwrap();
+
+    let summary = core.get_work_summary(&book.id).unwrap().unwrap();
+    let meta = summary.work_metadata.unwrap();
+    assert_eq!(meta.work_type, WorkType::Book);
+    assert_eq!(meta.type_metadata, Some(book_meta));
+
+    let prog = meta.progress.unwrap();
+    assert_eq!(prog.position, 280.0);
+    assert_eq!(prog.total_positions, Some(650.0));
+    assert_eq!(prog.position_type, ProgressPositionType::Page);
+    assert_eq!(prog.unit.as_deref(), Some("页"));
+}
+
+#[test]
+fn test_work_hybrid_local_and_external_with_restart_persistence() {
+    // Verifies Guardrails Section 31, 32: 1 Work with multiple local directories + external references + reopen DB
+    let temp_root = std::env::temp_dir().join(format!("looma_hybrid_test_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_root).expect("create temp root failed");
+
+    let db_path = temp_root.join("hybrid_test.db");
+    let loc_a = temp_root.join("BLEACH_Season1");
+    let loc_b = temp_root.join("BLEACH_Archive");
+    std::fs::create_dir_all(&loc_a).unwrap();
+    std::fs::create_dir_all(&loc_b).unwrap();
+
+    let work_id: String;
+    let asset_a_id: String;
+    let asset_b_id: String;
+
+    {
+        let db = Arc::new(LoomaDb::open(&db_path).unwrap());
+        let core = LoomaCore::new(db.clone());
+
+        let work = core.create_work(
+            "test",
+            "BLEACH",
+            WorkType::Anime,
+            RecordStatus::Completed,
+            Some("BLEACH".to_string()),
+            None,
+        ).unwrap();
+        work_id = work.id.clone();
+
+        // 2 local directories linked to the SAME work
+        let (ast_a, _) = core.link_work_directory("test", &work.id, &loc_a.to_string_lossy()).unwrap();
+        let (ast_b, _) = core.link_work_directory("test", &work.id, &loc_b.to_string_lossy()).unwrap();
+        asset_a_id = ast_a.id.clone();
+        asset_b_id = ast_b.id.clone();
+
+        // 2 external references
+        let ref_1 = ExternalReference {
+            id: "ref-h1".to_string(),
+            entity_id: Some(work.id.clone()),
+            provider: "bangumi".to_string(),
+            title: "Bangumi".to_string(),
+            url: "https://bgm.tv/subject/1".to_string(),
+            description: None,
+            metadata: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let ref_2 = ExternalReference {
+            id: "ref-h2".to_string(),
+            entity_id: Some(work.id.clone()),
+            provider: "official".to_string(),
+            title: "Official".to_string(),
+            url: "https://bleach-anime.com".to_string(),
+            description: None,
+            metadata: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        core.create_external_reference("test", &ref_1).unwrap();
+        core.create_external_reference("test", &ref_2).unwrap();
+    }
+
+    // Reopen DB from disk
+    {
+        let db = Arc::new(LoomaDb::open(&db_path).unwrap());
+        let core = LoomaCore::new(db.clone());
+
+        let summary = core.get_work_summary(&work_id).unwrap().unwrap();
+        assert_eq!(summary.entity.id, work_id);
+        assert_eq!(summary.linked_assets.len(), 2, "1 Work MUST maintain 2 directory assets across restart");
+        assert!(summary.linked_assets.iter().any(|a| a.id == asset_a_id));
+        assert!(summary.linked_assets.iter().any(|a| a.id == asset_b_id));
+
+        assert_eq!(summary.external_references.len(), 2, "1 Work MUST maintain 2 external references across restart");
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn test_missing_asset_integrity_and_generic_relocate() {
+    // Verifies Guardrails Section 33, 34: Missing folder does not delete Work, and relocate preserves Work Identity
+    let temp_root = std::env::temp_dir().join(format!("looma_relocate_test_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_root).expect("create temp root failed");
+
+    let old_dir = temp_root.join("Movie_Old");
+    let new_dir = temp_root.join("Movie_New");
+    std::fs::create_dir_all(&old_dir).unwrap();
+    std::fs::create_dir_all(&new_dir).unwrap();
+
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let movie = core.create_work(
+        "test",
+        "奥本海默",
+        WorkType::Movie,
+        RecordStatus::Completed,
+        Some("Oppenheimer".to_string()),
+        None,
+    ).unwrap();
+
+    // Link old directory
+    let (old_asset, _) = core.link_work_directory("test", &movie.id, &old_dir.to_string_lossy()).unwrap();
+    let old_asset_id = old_asset.id.clone();
+
+    // 1. Delete folder from disk -> triggers Missing status on asset, BUT does NOT delete Work or Relation!
+    std::fs::remove_dir_all(&old_dir).unwrap();
+
+    let summary_missing = core.get_work_summary(&movie.id).unwrap().unwrap();
+    assert_eq!(summary_missing.entity.id, movie.id, "Work MUST NOT be deleted when asset path is missing");
+    assert_eq!(summary_missing.linked_assets.len(), 1, "Relation MUST NOT be deleted when asset is missing");
+    assert_eq!(summary_missing.linked_assets[0].status, AssetStatus::Missing);
+
+    // 2. Perform generic relocation
+    let (new_asset, new_rel) = core.relocate_work_directory(
+        "test",
+        &movie.id,
+        &old_asset_id,
+        &new_dir.to_string_lossy(),
+    ).expect("relocation must succeed");
+
+    assert_eq!(new_rel.relation_type, relation_types::ATTACHES);
+
+    // 3. Confirm Work identity is preserved and new asset is active
+    let summary_relocated = core.get_work_summary(&movie.id).unwrap().unwrap();
+    assert_eq!(summary_relocated.entity.id, movie.id, "Work ID must remain identical after relocation");
+    assert_eq!(summary_relocated.linked_assets.len(), 1);
+    assert_eq!(summary_relocated.linked_assets[0].id, new_asset.id);
+    assert_eq!(summary_relocated.linked_assets[0].status, AssetStatus::Active);
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}

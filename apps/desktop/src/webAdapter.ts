@@ -876,6 +876,12 @@ class WebVaultService {
     return asset;
   }
 
+  public relocateWorkDirectory(workId: string, oldAssetId: string, newPath: string): Asset {
+    const asset = this.linkWorkDirectory(workId, newPath);
+    this.deleteRelationBetween(workId, oldAssetId);
+    return asset;
+  }
+
   public listMemories(): Memory[] {
     return [...this.store.memories];
   }
@@ -1047,6 +1053,8 @@ export function initWebMockAdapter() {
         return webVault.ensureDirectoryAsset(args.path);
       case 'link_work_directory':
         return webVault.linkWorkDirectory(args.workId || args.work_id, args.path);
+      case 'relocate_work_directory':
+        return webVault.relocateWorkDirectory(args.workId || args.work_id, args.oldAssetId || args.old_asset_id, args.newPath || args.new_path);
       case 'detect_game_candidates':
         return [
           {

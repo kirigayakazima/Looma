@@ -21,6 +21,10 @@ import {
   X,
   Image as ImageIcon,
   Minus,
+  Folder,
+  FolderPlus,
+  AlertTriangle,
+  RotateCw,
 } from 'lucide-react';
 import { Entity, Asset, ExternalReference, WorkSummary, WorkType, RecordStatus } from '../types';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -177,11 +181,11 @@ export const WorksView: React.FC<WorksViewProps> = ({
         description: newDesc.trim() || null,
       });
 
-      if (created && totalNum) {
-        // Set initial progress total
+      if (created) {
+        // Set initial progress (works for both finite and ongoing works)
         await safeInvoke('update_work_progress', {
           id: created.id,
-          position: newStatus === 'completed' ? totalNum : 0,
+          position: newStatus === 'completed' && totalNum ? totalNum : 0,
           positionType: null,
           totalPositions: totalNum,
           unit: null,
@@ -264,6 +268,37 @@ export const WorksView: React.FC<WorksViewProps> = ({
       targetId: activeWorkId,
     });
     await loadWorkSummary(activeWorkId);
+  };
+
+  // Link Folder as Directory Asset via Native Folder Picker
+  const handleLinkFolder = async () => {
+    if (!activeWorkId) return;
+    const picked = await safeInvoke<string>('pick_folder');
+    if (picked) {
+      await safeInvoke('link_work_directory', {
+        workId: activeWorkId,
+        path: picked,
+      });
+      await loadWorkSummary(activeWorkId);
+      await loadWorks();
+      if (onRefreshAll) onRefreshAll();
+    }
+  };
+
+  // Relocate Missing Directory Asset to a new folder
+  const handleRelocateAsset = async (oldAssetId: string) => {
+    if (!activeWorkId) return;
+    const picked = await safeInvoke<string>('pick_folder');
+    if (picked) {
+      await safeInvoke('relocate_work_directory', {
+        workId: activeWorkId,
+        oldAssetId,
+        newPath: picked,
+      });
+      await loadWorkSummary(activeWorkId);
+      await loadWorks();
+      if (onRefreshAll) onRefreshAll();
+    }
   };
 
   // Filtered Works List
@@ -506,6 +541,36 @@ export const WorksView: React.FC<WorksViewProps> = ({
                       {work.description}
                     </p>
                   )}
+                  {/* Type-specific metadata tags */}
+                  {meta?.type_metadata && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {meta.type_metadata.studio && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20">
+                          {meta.type_metadata.studio}
+                        </span>
+                      )}
+                      {meta.type_metadata.season && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20">
+                          {meta.type_metadata.season}
+                        </span>
+                      )}
+                      {meta.type_metadata.author && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                          作者: {meta.type_metadata.author}
+                        </span>
+                      )}
+                      {meta.type_metadata.director && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-300 border border-rose-500/20">
+                          导演: {meta.type_metadata.director}
+                        </span>
+                      )}
+                      {meta.type_metadata.isbn && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20 font-mono">
+                          ISBN: {meta.type_metadata.isbn}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Progress Stepper & Bar */}
@@ -514,7 +579,7 @@ export const WorksView: React.FC<WorksViewProps> = ({
                     <span className="text-neutral-400">进度:</span>
                     <span className="font-mono text-neutral-200 font-medium">
                       第 {pos} {unit}
-                      {total ? ` / ${total} ${unit}` : ''}
+                      {total ? ` / ${total} ${unit}` : ' (连载/进行中)'}
                       {percent !== null ? ` (${percent}%)` : ''}
                     </span>
                   </div>
@@ -700,48 +765,98 @@ export const WorksView: React.FC<WorksViewProps> = ({
                     )}
                   </div>
 
-                  {/* Linked Assets (本地关联资源) */}
+                  {/* Linked Assets (本地关联资源与目录) */}
                   <div className="space-y-2.5">
                     <div className="flex items-center justify-between">
                       <h4 className="text-xs font-semibold text-neutral-300 uppercase tracking-wider flex items-center space-x-1.5">
-                        <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>关联本地文件 / 海报 ({activeSummary.linked_assets.length})</span>
+                        <Folder className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>关联本地文件与目录 ({activeSummary.linked_assets.length})</span>
                       </h4>
-                      <button
-                        onClick={() => setShowLinkAssetModal(true)}
-                        className="text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 flex items-center space-x-1 transition-colors"
-                      >
-                        <Plus className="w-3 h-3" />
-                        <span>关联本地资产</span>
-                      </button>
+                      <div className="flex items-center space-x-1.5">
+                        <button
+                          onClick={handleLinkFolder}
+                          className="text-xs px-2.5 py-1 rounded bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 flex items-center space-x-1 transition-colors cursor-pointer"
+                          title="选择本地番剧/漫画/游戏/书籍目录关联至此档案"
+                        >
+                          <FolderPlus className="w-3 h-3" />
+                          <span>关联本地目录</span>
+                        </button>
+                        <button
+                          onClick={() => setShowLinkAssetModal(true)}
+                          className="text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 flex items-center space-x-1 transition-colors cursor-pointer"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>关联文件/海报</span>
+                        </button>
+                      </div>
                     </div>
 
                     {activeSummary.linked_assets.length === 0 ? (
                       <p className="text-xs text-neutral-500 py-3 text-center border border-dashed border-neutral-800 rounded-lg">
-                        暂未关联本地文件，点击上方按钮关联已扫描的壁纸或海报
+                        暂未关联本地资源（支持纯线上追踪），点击上方按钮可挂载本地目录或单文件资产
                       </p>
                     ) : (
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                        {activeSummary.linked_assets.map((asset) => (
-                          <div
-                            key={asset.id}
-                            className="relative group bg-neutral-950 border border-neutral-800 rounded-lg p-2 flex flex-col justify-between"
-                          >
-                            <div className="flex items-center space-x-1.5 text-xs text-neutral-300 truncate mb-1">
-                              <ImageIcon className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                              <span className="truncate">{asset.path?.split(/[\\/]/).pop()}</span>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {activeSummary.linked_assets.map((asset) => {
+                          const isDir = asset.kind === 'directory';
+                          const isMissing = asset.status === 'missing';
+                          return (
+                            <div
+                              key={asset.id}
+                              className={`relative group bg-neutral-950 border rounded-lg p-2.5 flex flex-col justify-between transition-colors ${
+                                isMissing
+                                  ? 'border-rose-500/40 bg-rose-950/10'
+                                  : 'border-neutral-800 hover:border-neutral-700'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2 mb-1.5">
+                                <div className="flex items-center space-x-2 truncate">
+                                  {isDir ? (
+                                    <Folder className={`w-4 h-4 shrink-0 ${isMissing ? 'text-rose-400' : 'text-amber-400'}`} />
+                                  ) : (
+                                    <ImageIcon className="w-4 h-4 text-emerald-400 shrink-0" />
+                                  )}
+                                  <div className="truncate">
+                                    <p className="text-xs font-medium text-neutral-200 truncate">
+                                      {asset.path?.split(/[\\/]/).pop() || asset.id}
+                                    </p>
+                                    <p className="text-[11px] text-neutral-500 truncate" title={asset.path || ''}>
+                                      {asset.path || '无本地路径'}
+                                    </p>
+                                  </div>
+                                </div>
+                                {isMissing && (
+                                  <span className="shrink-0 inline-flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                    <span>失效</span>
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center justify-between pt-1.5 border-t border-neutral-850/80 text-[11px] text-neutral-400">
+                                <span>{isDir ? '本地目录' : asset.kind}</span>
+                                <div className="flex items-center space-x-2">
+                                  {isMissing && isDir && (
+                                    <button
+                                      onClick={() => handleRelocateAsset(asset.id)}
+                                      className="text-amber-400 hover:underline flex items-center space-x-1 cursor-pointer"
+                                      title="重新选择该目录在本地的新位置"
+                                    >
+                                      <RotateCw className="w-3 h-3" />
+                                      <span>重新定位</span>
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => handleUnlinkAsset(asset.id)}
+                                    className="text-rose-400 hover:underline cursor-pointer"
+                                  >
+                                    解除
+                                  </button>
+                                </div>
+                              </div>
                             </div>
-                            <div className="flex items-center justify-between pt-1 border-t border-neutral-850 text-[10px] text-neutral-500">
-                              <span>{asset.kind}</span>
-                              <button
-                                onClick={() => handleUnlinkAsset(asset.id)}
-                                className="text-rose-400 hover:underline"
-                              >
-                                解除
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -886,13 +1001,13 @@ export const WorksView: React.FC<WorksViewProps> = ({
 
                 <div>
                   <label className="text-xs font-medium text-neutral-300 block mb-1">
-                    总集数 / 总话数 (可选)
+                    总集/话/卷/页数 (留空表示连载中)
                   </label>
                   <input
                     type="number"
                     value={newTotalPos}
                     onChange={(e) => setNewTotalPos(e.target.value)}
-                    placeholder="例如：24"
+                    placeholder="留空表示连载中或未知上限"
                     className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
