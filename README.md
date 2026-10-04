@@ -9,8 +9,9 @@
 [![Stack](https://img.shields.io/badge/Stack-Rust%202021%20%2B%20Tauri%202%20%2B%20React-blueviolet.svg)]()
 [![Storage](https://img.shields.io/badge/Storage-SQLite%20(WAL%20%2B%20FTS5)-success.svg)]()
 [![Protocol](https://img.shields.io/badge/AI%20Protocol-Model%20Context%20Protocol%20(MCP)-orange.svg)]()
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-emerald.svg)](https://kirigayakazima.github.io/Looma/)
 
-[English](#english) | [简体中文](#简体中文)
+[English](#english) | [简体中文](#简体中文) | [在线演示 (Web Demo)](https://kirigayakazima.github.io/Looma/)
 
 </div>
 
@@ -47,6 +48,14 @@ Looma 的目标是帮用户把这些内容有机地编织成一个整体，同�
   * 心得与评测手记 (Memories)
   * 所属清单与追番单 (Collections)
   * 创作者与改编系列图谱 (Relations)
+
+#### 🎮 个人游戏库与多硬盘聚合 (Personal Game Library & Multi-Disk Aggregator)
+* **跨盘符分布统计**：穿透统计各游戏在不同硬盘（`C:` / `D:` / `E:` / `F:` 等）的分布状态，并快速过滤仅网络记录与本地已安装游戏；
+* **多本地位置支持 (Multi-Location)**：同一款游戏支持关联多个物理位置（例如主游玩盘与多盘冷备份同时绑定）；
+* **本地游戏候选安全识别 (Candidate Detection)**：
+  * 基于 `.exe` 及子目录特征快速嗅探潜在游戏目录；
+  * **绝不自动污染数据库**：扫描识别结果以候选卡片呈现，经用户审查确认后一键建立游戏档案或关联为附加位置；
+* **直达与封面指定**：卡片支持一键呼出 Windows 资源管理器直接定位游戏目录，并可将任意关联的游戏截图/原画一键指定为卡片封面。
 
 #### 📁 本地资产与增量扫描器 (Assets & Incremental Scanner)
 * **引用模式（Reference Mode）**：仅记录索引元数据与 SHA256 哈希，绝不私自搬移、重命名或上传您的原盘原始媒体；
@@ -109,11 +118,15 @@ looma/
 
 ### 3. 快速上手
 
+#### 在线体验 (Live Web Demo)
+无需安装任何环境，直接在浏览器中体验完整交互式演示（预置真实数据，修改自动持久化于浏览器本地）：
+👉 **[https://kirigayakazima.github.io/Looma/](https://kirigayakazima.github.io/Looma/)**
+
 #### 运行桌面版 (GUI)
-已打包的可执行文件位于 `target/release/`：
+已打包的可执行文件位于根目录 `Looma.exe`（或 `target/release/looma-desktop.exe`）：
 * 直接双击运行：
   ```
-  target/release/looma-desktop.exe
+  .\Looma.exe
   ```
 * 首次启动将自动在用户应用目录下创建并就绪您的个人数字保险库。
 
@@ -178,6 +191,8 @@ cargo build --release -p looma-cli -p looma-mcp
 
 Looma is a local-first, user-owned, extensible personal digital OS and media weaving vault that organizes your personal files, cultural works, memories, and timelines without requiring you to surrender ownership of your files.
 
+- **Online Interactive Demo**: Try the full interactive web demo directly in your browser: [kirigayakazima.github.io/Looma](https://kirigayakazima.github.io/Looma/).
+- **Personal Game Library**: Aggregates games across hard drives (C:, D:, E:, F:), safe Candidate Detection without database pollution, multi-location backup linking, and direct Windows file manager integration.
 - **Personal Media Tracking**: Structural tracking for Anime, Manga, Games, Books, Movies & Music with interactive progress steppers and direct system browser openers.
 - **Reference Mode**: Weaves assets without duplicating, relocating, or altering your existing disk files.
 - **Offline & Private**: Zero telemetry, no cloud dependency, completely offline.
