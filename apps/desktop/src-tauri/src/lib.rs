@@ -389,6 +389,105 @@ fn open_external_url(url: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GameCandidate {
+    pub id: String,
+    pub path: String,
+    pub deduced_title: String,
+    pub drive: String,
+    pub has_executable: bool,
+    pub file_count: usize,
+    pub matched_work_id: Option<String>,
+    pub matched_work_title: Option<String>,
+}
+
+#[tauri::command]
+fn update_work_cover_asset(
+    id: String,
+    cover_asset_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Entity, String> {
+    state.core.update_work_cover_asset("desktop", &id, cover_asset_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn detect_game_candidates(
+    root_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<GameCandidate>, String> {
+    let p = std::path::Path::new(&root_path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", root_path));
+    }
+
+    let existing_games = state.core.list_works(Some("game"), None)
+        .unwrap_or_default();
+
+    let mut candidates = Vec::new();
+    let read_dir = match std::fs::read_dir(p) {
+        Ok(rd) => rd,
+        Err(e) => return Err(format!("Failed to read directory: {e}")),
+    };
+
+    for entry in read_dir.flatten() {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            if dir_name.starts_with('.') || dir_name == "$RECYCLE.BIN" || dir_name == "System Volume Information" {
+                continue;
+            }
+
+            let mut has_exe = false;
+            let mut file_count = 0usize;
+            if let Ok(sub_rd) = std::fs::read_dir(&entry_path) {
+                for sub_entry in sub_rd.flatten() {
+                    file_count += 1;
+                    if let Some(ext) = sub_entry.path().extension() {
+                        if ext.to_string_lossy().eq_ignore_ascii_case("exe") {
+                            has_exe = true;
+                        }
+                    }
+                }
+            }
+
+            let path_str = entry_path.to_string_lossy().to_string();
+            let drive = if path_str.len() >= 2 && &path_str[1..2] == ":" {
+                path_str[0..2].to_uppercase()
+            } else {
+                "Local".to_string()
+            };
+
+            let deduced_title = dir_name.replace('_', " ").replace('-', " ");
+            let mut matched_work_id = None;
+            let mut matched_work_title = None;
+            let norm_deduced = deduced_title.to_lowercase().replace(' ', "");
+
+            for w in &existing_games {
+                let norm_w = w.title.to_lowercase().replace(' ', "");
+                if norm_w == norm_deduced || norm_w.contains(&norm_deduced) || norm_deduced.contains(&norm_w) {
+                    matched_work_id = Some(w.id.clone());
+                    matched_work_title = Some(w.title.clone());
+                    break;
+                }
+            }
+
+            candidates.push(GameCandidate {
+                id: format!("cand_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+                path: path_str,
+                deduced_title,
+                drive,
+                has_executable: has_exe,
+                file_count,
+                matched_work_id,
+                matched_work_title,
+            });
+        }
+    }
+
+    Ok(candidates)
+}
+
 fn resolve_default_vault_path() -> PathBuf {
     if let Some(proj_dirs) = ProjectDirs::from("com", "looma", "Looma") {
         let data_dir = proj_dirs.data_dir();
@@ -463,6 +562,8 @@ pub fn run() {
             create_work,
             update_work_status,
             update_work_progress,
+            update_work_cover_asset,
+            detect_game_candidates,
             open_external_url
         ])
         .run(tauri::generate_context!())

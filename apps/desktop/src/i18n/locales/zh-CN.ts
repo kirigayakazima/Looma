@@ -19,6 +19,7 @@ export const zhCN = {
   nav: {
     home: '概览',
     works: '作品档案',
+    games: '个人游戏库',
     assets: '数字资产',
     entities: '实体概念',
     collections: '集合收藏',

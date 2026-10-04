@@ -16,9 +16,20 @@ export interface VaultStats {
   database_size_bytes: number;
 }
 
-export type AssetKind = 'image' | 'video' | 'audio' | 'document' | 'archive' | 'model3d' | 'code' | 'other';
+export type AssetKind = 'image' | 'video' | 'audio' | 'document' | 'archive' | 'model3d' | 'code' | 'directory' | 'other';
 export type AssetSource = 'local' | 'managed' | 'external';
 export type AssetStatus = 'active' | 'missing' | 'archived';
+
+export interface GameCandidate {
+  id: string;
+  path: string;
+  deduced_title: string;
+  drive: string;
+  has_executable: boolean;
+  file_count: number;
+  matched_work_id?: string | null;
+  matched_work_title?: string | null;
+}
 
 export interface Asset {
   id: string;

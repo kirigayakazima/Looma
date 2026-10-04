@@ -21,6 +21,7 @@ export const enUS: TranslationType = {
   nav: {
     home: 'Overview',
     works: 'Works & Media',
+    games: 'Game Library',
     assets: 'Assets',
     entities: 'Entities',
     collections: 'Collections',

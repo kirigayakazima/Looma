@@ -133,6 +133,11 @@ impl IntelligenceEngine {
                                 confidence = (confidence + 0.05).min(1.0);
                             }
                         }
+                        AssetKind::Directory => {
+                            if et_lower.contains("game") || et_lower.contains("游戏") {
+                                confidence = (confidence + 0.10).min(1.0);
+                            }
+                        }
                         _ => {}
                     }
                 }

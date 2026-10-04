@@ -240,6 +240,39 @@ impl Entity {
         self
     }
 
+    /// Attach a cover asset ID to this work
+    pub fn with_cover_asset(mut self, asset_id: &str) -> Self {
+        self.set_cover_asset_id(Some(asset_id));
+        self
+    }
+
+    /// Set or clear cover asset ID on work metadata
+    pub fn set_cover_asset_id(&mut self, asset_id: Option<&str>) {
+        if let Some(obj) = self.properties.as_object_mut() {
+            if let Some(work_val) = obj.get_mut("work") {
+                if let Some(work_obj) = work_val.as_object_mut() {
+                    match asset_id {
+                        Some(id) => {
+                            work_obj.insert("cover_asset_id".to_string(), json!(id));
+                        }
+                        None => {
+                            work_obj.remove("cover_asset_id");
+                        }
+                    }
+                }
+            }
+            match asset_id {
+                Some(id) => {
+                    obj.insert("cover_asset_id".to_string(), json!(id));
+                }
+                None => {
+                    obj.remove("cover_asset_id");
+                }
+            }
+            self.updated_at = Utc::now();
+        }
+    }
+
     /// Create a new Entity representing a Person or Character
     pub fn new_person(name: &str, subtype: Option<&str>, description: Option<String>) -> Self {
         Self {

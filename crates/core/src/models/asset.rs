@@ -11,6 +11,7 @@ pub enum AssetKind {
     Archive,
     Model3d,
     Code,
+    Directory,
     Other,
 }
 

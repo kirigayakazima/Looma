@@ -184,3 +184,135 @@ fn test_work_domain_lifecycle_and_summary() {
     let final_summary = core.get_work_summary(&anime.id).unwrap().unwrap();
     assert_eq!(final_summary.work_metadata.unwrap().progress.unwrap().position, 24.0);
 }
+
+#[test]
+fn test_game_library_extension_multi_location_and_cover() {
+    let db = Arc::new(LoomaDb::in_memory().expect("in-memory db init failed"));
+    let core = LoomaCore::new(db.clone());
+
+    // 1. Create a Game Work
+    let game = core.create_work(
+        "test-suite",
+        "NieR:Automata",
+        WorkType::Game,
+        RecordStatus::InProgress,
+        Some("ニーア オートマタ".to_string()),
+        Some("探讨存在主义与人造人悲剧命运的动作哲学巨作".to_string()),
+    ).expect("failed to create game work");
+
+    assert_eq!(game.entity_type, "game");
+    let meta = game.as_work_metadata().expect("expected work metadata");
+    assert_eq!(meta.work_type, WorkType::Game);
+    assert_eq!(meta.status, RecordStatus::InProgress);
+
+    // 2. Link Multiple Local Directories across different drives (E: and F:)
+    let dir_primary = Asset {
+        id: "asset_game_dir_e".to_string(),
+        kind: AssetKind::Directory,
+        source: AssetSource::Local,
+        path: Some("E:/Games/NieR_Automata".to_string()),
+        size: Some(48 * 1024 * 1024 * 1024),
+        hash: None,
+        mime_type: Some("inode/directory".to_string()),
+        metadata: json!({ "drive": "E:" }),
+        status: AssetStatus::Active,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        indexed_at: Utc::now(),
+    };
+    db.upsert_asset(&dir_primary).expect("failed to index primary game dir");
+
+    let dir_backup = Asset {
+        id: "asset_game_dir_f".to_string(),
+        kind: AssetKind::Directory,
+        source: AssetSource::Local,
+        path: Some("F:/Archive/Games/NieR_Automata".to_string()),
+        size: Some(48 * 1024 * 1024 * 1024),
+        hash: None,
+        mime_type: Some("inode/directory".to_string()),
+        metadata: json!({ "drive": "F:" }),
+        status: AssetStatus::Active,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        indexed_at: Utc::now(),
+    };
+    db.upsert_asset(&dir_backup).expect("failed to index backup game dir");
+
+    // Link both directories to Game Work
+    let rel_e = Relation {
+        id: "rel_game_e".to_string(),
+        source_id: game.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::ATTACHES.to_string(),
+        target_id: dir_primary.id.clone(),
+        target_type: "asset".to_string(),
+        metadata: json!({ "description": "Primary installation" }),
+        created_at: Utc::now(),
+    };
+    core.create_relation("test-suite", &rel_e).expect("failed to link primary dir");
+
+    let rel_f = Relation {
+        id: "rel_game_f".to_string(),
+        source_id: game.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::ATTACHES.to_string(),
+        target_id: dir_backup.id.clone(),
+        target_type: "asset".to_string(),
+        metadata: json!({ "description": "Cold archive backup" }),
+        created_at: Utc::now(),
+    };
+    core.create_relation("test-suite", &rel_f).expect("failed to link backup dir");
+
+    // 3. Link Cover Asset
+    let cover_asset = Asset {
+        id: "asset_nier_cover".to_string(),
+        kind: AssetKind::Image,
+        source: AssetSource::Local,
+        path: Some("E:/Games/NieR_Automata/cover.png".to_string()),
+        size: Some(1024 * 1024),
+        hash: Some("sha256_nier_cover".to_string()),
+        mime_type: Some("image/png".to_string()),
+        metadata: json!({}),
+        status: AssetStatus::Active,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        indexed_at: Utc::now(),
+    };
+    db.upsert_asset(&cover_asset).expect("failed to index cover image");
+
+    let cover_updated = core.update_work_cover_asset("test-suite", &game.id, Some(cover_asset.id.clone()))
+        .expect("failed to update cover asset");
+    assert_eq!(
+        cover_updated.as_work_metadata().unwrap().cover_asset_id.as_deref(),
+        Some("asset_nier_cover")
+    );
+
+    // 4. Add External Reference (Steam)
+    let steam_ref = ExternalReference {
+        id: "ref_steam_nier".to_string(),
+        entity_id: Some(game.id.clone()),
+        provider: "steam".to_string(),
+        title: "Steam Store Page".to_string(),
+        url: "https://store.steampowered.com/app/524220/NieRAutomata/".to_string(),
+        description: Some("PlatinumGames Action RPG".to_string()),
+        metadata: json!({}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    core.create_external_reference("test-suite", &steam_ref).expect("failed to link steam ref");
+
+    // 5. Verify Unified WorkSummary
+    let summary = core.get_work_summary(&game.id).expect("get_work_summary failed").unwrap();
+    assert_eq!(summary.entity.title, "NieR:Automata");
+    assert_eq!(summary.linked_assets.len(), 2); // Both E: and F: directories
+    assert_eq!(summary.external_references.len(), 1);
+    assert_eq!(summary.external_references[0].provider, "steam");
+
+    let meta = summary.work_metadata.unwrap();
+    assert_eq!(meta.cover_asset_id.as_deref(), Some("asset_nier_cover"));
+
+    // 6. Verify Game Query
+    let games = core.list_works(Some("game"), None).expect("failed to list games");
+    assert_eq!(games.len(), 1);
+    assert_eq!(games[0].title, "NieR:Automata");
+}

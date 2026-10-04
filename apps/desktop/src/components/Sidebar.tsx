@@ -2,6 +2,7 @@ import React from 'react';
 import {
   LayoutDashboard,
   Film,
+  Gamepad2,
   FolderArchive,
   Boxes,
   BookmarkCheck,
@@ -13,7 +14,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 
-export type NavTab = 'home' | 'works' | 'assets' | 'entities' | 'collections' | 'timeline' | 'memories' | 'insights' | 'settings';
+export type NavTab = 'home' | 'works' | 'games' | 'assets' | 'entities' | 'collections' | 'timeline' | 'memories' | 'insights' | 'settings';
 
 interface SidebarProps {
   currentTab: NavTab;
@@ -27,6 +28,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onSelectTab, vault
   const navItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: t.nav.home, icon: <LayoutDashboard className="w-4 h-4" /> },
     { id: 'works', label: t.nav.works, icon: <Film className="w-4 h-4 text-indigo-400" /> },
+    { id: 'games', label: t.nav.games, icon: <Gamepad2 className="w-4 h-4 text-emerald-400" /> },
     { id: 'assets', label: t.nav.assets, icon: <FolderArchive className="w-4 h-4" /> },
     { id: 'entities', label: t.nav.entities, icon: <Boxes className="w-4 h-4" /> },
     { id: 'collections', label: t.nav.collections, icon: <BookmarkCheck className="w-4 h-4" /> },

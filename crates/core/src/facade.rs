@@ -365,6 +365,35 @@ impl LoomaCore {
         Ok(entity)
     }
 
+    pub fn update_work_cover_asset(
+        &self,
+        actor: &str,
+        entity_id: &str,
+        cover_asset_id: Option<String>,
+    ) -> LoomaResult<Entity> {
+        let mut entity = self.get_entity(entity_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity not found: {entity_id}")))?;
+
+        entity.set_cover_asset_id(cover_asset_id.as_deref());
+        self.update_entity(actor, &entity)?;
+
+        self.record_audit(
+            actor,
+            "work.cover_update",
+            "entity",
+            entity_id,
+            "success",
+            json!({ "cover_asset_id": cover_asset_id }),
+        )?;
+
+        self.emit_event(
+            actor,
+            DomainEvent::EntityUpdated { id: entity_id.to_string() },
+        );
+
+        Ok(entity)
+    }
+
     pub fn list_works(
         &self,
         work_type: Option<&str>,

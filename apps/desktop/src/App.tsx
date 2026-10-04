@@ -4,6 +4,7 @@ import { Sidebar, NavTab } from './components/Sidebar';
 import { Header } from './components/Header';
 import { HomeView } from './components/HomeView';
 import { WorksView } from './components/WorksView';
+import { GamesView } from './components/GamesView';
 import { AssetsView } from './components/AssetsView';
 import { EntitiesView } from './components/EntitiesView';
 import { MemoriesView } from './components/MemoriesView';
@@ -101,6 +102,8 @@ export const App: React.FC = () => {
         return t.nav.home;
       case 'works':
         return t.nav.works;
+      case 'games':
+        return t.nav.games;
       case 'assets':
         return t.nav.assets;
       case 'entities':
@@ -198,6 +201,12 @@ export const App: React.FC = () => {
               )}
               {currentTab === 'works' && (
                 <WorksView
+                  assets={assets}
+                  onRefreshAll={loadData}
+                />
+              )}
+              {currentTab === 'games' && (
+                <GamesView
                   assets={assets}
                   onRefreshAll={loadData}
                 />

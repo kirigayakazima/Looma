@@ -208,23 +208,25 @@ export const LandingView: React.FC<LandingViewProps> = ({ onEnterDemo }) => {
               </div>
             </div>
 
-            {/* Card 2: Game Tracking */}
+            {/* Card 2: Game Library Tracking */}
             <div className="bg-neutral-950/80 rounded-xl p-4 border border-neutral-800 hover:border-emerald-500/40 transition-colors">
               <div className="flex items-center justify-between mb-3">
-                <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-sky-500/20 text-sky-400">
-                  游戏 / Game
+                <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/20 text-emerald-400 font-mono">
+                  游戏库 / Game
                 </span>
                 <span className="text-xs text-neutral-500">游玩中</span>
               </div>
-              <h3 className="font-semibold text-neutral-100 text-sm mb-1">鸣潮 (Wuthering Waves)</h3>
-              <p className="text-xs text-neutral-500 mb-3 line-clamp-1">动作RPG · 今州乘霄山主线</p>
+              <h3 className="font-semibold text-neutral-100 text-sm mb-1">尼尔：机械纪元 (NieR:Automata)</h3>
+              <p className="text-xs text-neutral-400 mb-2 font-mono truncate">
+                📁 E:\Games\NieR_Automata
+              </p>
               <div className="space-y-1.5">
                 <div className="flex justify-between text-xs">
-                  <span className="text-neutral-400">探索进度</span>
-                  <span className="text-sky-400 font-mono font-medium">92%</span>
+                  <span className="text-neutral-400">通关进度</span>
+                  <span className="text-emerald-400 font-mono font-medium">第 3 / 5 结局周目</span>
                 </div>
                 <div className="w-full bg-neutral-800 h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-sky-500 h-full rounded-full" style={{ width: '92%' }} />
+                  <div className="bg-emerald-500 h-full rounded-full" style={{ width: '60%' }} />
                 </div>
               </div>
             </div>

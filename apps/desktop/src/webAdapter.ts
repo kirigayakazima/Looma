@@ -92,6 +92,48 @@ function getDefaultStore(): WebStore {
         modified_at: '2024-08-15T09:00:00Z',
         indexed_at: '2024-10-01T10:00:00Z',
       },
+      {
+        id: 'asset_nier_dir',
+        kind: 'directory',
+        source: 'local',
+        path: 'E:/Games/NieR_Automata',
+        size: 51539607552,
+        hash: null,
+        mime_type: 'inode/directory',
+        metadata: { drive: 'E:', files_count: 1420 },
+        status: 'active',
+        created_at: '2024-03-10T12:00:00Z',
+        modified_at: '2024-03-10T12:00:00Z',
+        indexed_at: '2024-10-01T10:00:00Z',
+      },
+      {
+        id: 'asset_cp2077_dir1',
+        kind: 'directory',
+        source: 'local',
+        path: 'E:/SteamLibrary/steamapps/common/Cyberpunk 2077',
+        size: 78539607552,
+        hash: null,
+        mime_type: 'inode/directory',
+        metadata: { drive: 'E:', source: 'steam' },
+        status: 'active',
+        created_at: '2024-01-15T12:00:00Z',
+        modified_at: '2024-01-15T12:00:00Z',
+        indexed_at: '2024-10-01T10:00:00Z',
+      },
+      {
+        id: 'asset_cp2077_dir2',
+        kind: 'directory',
+        source: 'local',
+        path: 'F:/Backup/Cyberpunk2077',
+        size: 78539607552,
+        hash: null,
+        mime_type: 'inode/directory',
+        metadata: { drive: 'F:', source: 'cold_backup' },
+        status: 'active',
+        created_at: '2024-02-01T12:00:00Z',
+        modified_at: '2024-02-01T12:00:00Z',
+        indexed_at: '2024-10-01T10:00:00Z',
+      },
     ],
     entities: [
       {
@@ -220,6 +262,87 @@ function getDefaultStore(): WebStore {
         created_at: '2024-05-23T10:00:00Z',
         updated_at: '2024-05-23T10:00:00Z',
       },
+      {
+        id: 'work_nier',
+        entity_type: 'game',
+        title: '尼尔：机械纪元',
+        description: '探讨存在主义与人造人悲剧命运的动作哲学巨作。本地存储位置: E:\\Games\\NieR_Automata',
+        properties: {
+          domain: 'work',
+          status: 'in_progress',
+          work_type: 'game',
+          work: {
+            work_type: 'game',
+            status: 'in_progress',
+            original_title: 'NieR:Automata',
+            release_year: 2017,
+            rating: 9.8,
+            progress: {
+              position: 3,
+              position_type: 'custom',
+              total_positions: 5,
+              unit: '周目/结局',
+              updated_at: '2024-10-03T18:00:00Z',
+            },
+          },
+        },
+        created_at: '2024-03-10T12:00:00Z',
+        updated_at: '2024-10-03T18:00:00Z',
+      },
+      {
+        id: 'work_cp2077',
+        entity_type: 'game',
+        title: '赛博朋克 2077',
+        description: '夜之城传奇雇佣兵 V 与强尼·银手的交织旅程。已在两处硬盘备份: E:\\SteamLibrary\\Cyberpunk 2077 与 F:\\Backup\\Cyberpunk2077',
+        properties: {
+          domain: 'work',
+          status: 'completed',
+          work_type: 'game',
+          work: {
+            work_type: 'game',
+            status: 'completed',
+            original_title: 'Cyberpunk 2077',
+            release_year: 2020,
+            rating: 9.3,
+            progress: {
+              position: 100,
+              position_type: 'percentage',
+              total_positions: 100,
+              unit: '%',
+              updated_at: '2024-08-20T21:00:00Z',
+            },
+          },
+        },
+        created_at: '2024-01-15T12:00:00Z',
+        updated_at: '2024-08-20T21:00:00Z',
+      },
+      {
+        id: 'work_p5r',
+        entity_type: 'game',
+        title: '女神异闻录 5 皇家版',
+        description: '心之怪盗团偷走腐朽大人的欲望。本地目录: D:\\Games\\Persona5Royal',
+        properties: {
+          domain: 'work',
+          status: 'planned',
+          work_type: 'game',
+          work: {
+            work_type: 'game',
+            status: 'planned',
+            original_title: 'Persona 5 Royal',
+            release_year: 2019,
+            rating: 9.7,
+            progress: {
+              position: 0,
+              position_type: 'chapter',
+              total_positions: 8,
+              unit: '殿堂',
+              updated_at: '2024-10-01T10:00:00Z',
+            },
+          },
+        },
+        created_at: '2024-09-15T10:00:00Z',
+        updated_at: '2024-10-01T10:00:00Z',
+      },
     ],
     memories: [
       {
@@ -259,6 +382,15 @@ function getDefaultStore(): WebStore {
         created_at: '2024-01-01T10:00:00Z',
         updated_at: '2024-10-01T10:00:00Z',
       },
+      {
+        id: 'col_single_games',
+        title: '我的单机游戏',
+        description: '分散在各本地硬盘与 Steam 平台上的经典单机游戏档案',
+        query: null,
+        metadata: { icon: 'gamepad-2', color: '#10b981' },
+        created_at: '2024-01-01T10:00:00Z',
+        updated_at: '2024-10-04T12:00:00Z',
+      },
     ],
     collectionItems: [
       {
@@ -281,6 +413,27 @@ function getDefaultStore(): WebStore {
         item_type: 'entity',
         position: 2,
         added_at: '2024-03-24T10:00:00Z',
+      },
+      {
+        collection_id: 'col_single_games',
+        item_id: 'work_nier',
+        item_type: 'entity',
+        position: 0,
+        added_at: '2024-03-10T12:00:00Z',
+      },
+      {
+        collection_id: 'col_single_games',
+        item_id: 'work_cp2077',
+        item_type: 'entity',
+        position: 1,
+        added_at: '2024-01-15T12:00:00Z',
+      },
+      {
+        collection_id: 'col_single_games',
+        item_id: 'work_p5r',
+        item_type: 'entity',
+        position: 2,
+        added_at: '2024-09-15T10:00:00Z',
       },
     ],
     relations: [
@@ -344,6 +497,36 @@ function getDefaultStore(): WebStore {
         metadata: {},
         created_at: '2024-10-02T15:00:00Z',
       },
+      {
+        id: 'rel_nier_dir',
+        source_id: 'work_nier',
+        source_type: 'entity',
+        relation_type: 'attaches',
+        target_id: 'asset_nier_dir',
+        target_type: 'asset',
+        metadata: {},
+        created_at: '2024-03-10T12:00:00Z',
+      },
+      {
+        id: 'rel_cp2077_dir1',
+        source_id: 'work_cp2077',
+        source_type: 'entity',
+        relation_type: 'attaches',
+        target_id: 'asset_cp2077_dir1',
+        target_type: 'asset',
+        metadata: {},
+        created_at: '2024-01-15T12:00:00Z',
+      },
+      {
+        id: 'rel_cp2077_dir2',
+        source_id: 'work_cp2077',
+        source_type: 'entity',
+        relation_type: 'attaches',
+        target_id: 'asset_cp2077_dir2',
+        target_type: 'asset',
+        metadata: {},
+        created_at: '2024-02-01T12:00:00Z',
+      },
     ],
     externalReferences: [
       {
@@ -367,6 +550,28 @@ function getDefaultStore(): WebStore {
         metadata: {},
         created_at: '2024-09-01T10:00:00Z',
         updated_at: '2024-09-01T10:00:00Z',
+      },
+      {
+        id: 'ref_nier_steam',
+        entity_id: 'work_nier',
+        provider: 'steam',
+        title: 'Steam 商店页 (NieR:Automata)',
+        url: 'https://store.steampowered.com/app/524220/NieRAutomata/',
+        description: '白金工作室动作战斗',
+        metadata: {},
+        created_at: '2024-03-10T12:00:00Z',
+        updated_at: '2024-03-10T12:00:00Z',
+      },
+      {
+        id: 'ref_cp2077_steam',
+        entity_id: 'work_cp2077',
+        provider: 'steam',
+        title: 'Steam 商店页 (Cyberpunk 2077)',
+        url: 'https://store.steampowered.com/app/1091500/Cyberpunk_2077/',
+        description: 'CD PROJEKT RED 开放世界第一人称RPG',
+        metadata: {},
+        created_at: '2024-01-15T12:00:00Z',
+        updated_at: '2024-01-15T12:00:00Z',
       },
       {
         id: 'ref_wuwa_official',
@@ -575,6 +780,18 @@ class WebVaultService {
     return this.updateEntity(updated);
   }
 
+  public updateWorkCoverAsset(id: string, coverAssetId: string | null): Entity | null {
+    const ent = this.getEntity(id);
+    if (!ent) return null;
+    const props = { ...ent.properties } as any;
+    if (props.work && typeof props.work === 'object') {
+      props.work.cover_asset_id = coverAssetId;
+    }
+    props.cover_asset_id = coverAssetId;
+    const updated = { ...ent, properties: props, updated_at: new Date().toISOString() };
+    return this.updateEntity(updated);
+  }
+
   public getWorkSummary(id: string): WorkSummary | null {
     const ent = this.getEntity(id);
     if (!ent) return null;
@@ -776,6 +993,41 @@ export function initWebMockAdapter() {
         return webVault.updateWorkStatus(args.id, args.status);
       case 'update_work_progress':
         return webVault.updateWorkProgress(args.id, args.position, args.positionType, args.totalPositions, args.unit);
+      case 'update_work_cover_asset':
+        return webVault.updateWorkCoverAsset(args.id, args.coverAssetId);
+      case 'detect_game_candidates':
+        return [
+          {
+            id: 'cand_nier',
+            path: 'E:/Games/NieR_Automata',
+            deduced_title: 'NieR Automata',
+            drive: 'E:',
+            has_executable: true,
+            file_count: 24,
+            matched_work_id: 'work_nier',
+            matched_work_title: '尼尔：机械纪元',
+          },
+          {
+            id: 'cand_p5r',
+            path: 'D:/Games/Persona5Royal',
+            deduced_title: 'Persona 5 Royal',
+            drive: 'D:',
+            has_executable: true,
+            file_count: 36,
+            matched_work_id: 'work_p5r',
+            matched_work_title: '女神异闻录 5 皇家版',
+          },
+          {
+            id: 'cand_witcher3',
+            path: 'F:/Archive/Witcher3_WildHunt',
+            deduced_title: 'The Witcher 3 Wild Hunt',
+            drive: 'F:',
+            has_executable: true,
+            file_count: 18,
+            matched_work_id: null,
+            matched_work_title: null,
+          },
+        ];
       case 'get_work_summary':
         return webVault.getWorkSummary(args.id);
       case 'list_memories':
