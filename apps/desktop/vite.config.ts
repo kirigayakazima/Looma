@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 
 // @see https://vitejs.dev/config/
 export default defineConfig({
+  base: "./",
   plugins: [react()],
   // Prevent vite from obscuring rust errors
   clearScreen: false,

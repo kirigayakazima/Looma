@@ -14,9 +14,14 @@ import { SettingsView } from './components/SettingsView';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { VaultInfo, VaultStats, Asset, Entity, Memory, Collection } from './types';
 import { useI18n } from './i18n';
+import { LandingView } from './components/LandingView';
+import { isTauriEnvironment, webVault } from './webAdapter';
 
 export const App: React.FC = () => {
   const { t } = useI18n();
+  const [viewMode, setViewMode] = useState<'landing' | 'app'>(() =>
+    isTauriEnvironment() ? 'app' : 'landing'
+  );
   const [currentTab, setCurrentTab] = useState<NavTab>('home');
   const [vaultInfo, setVaultInfo] = useState<VaultInfo | null>(null);
   const [vaultStats, setVaultStats] = useState<VaultStats | null>(null);
@@ -113,22 +118,71 @@ export const App: React.FC = () => {
     }
   };
 
-  return (
-    <div className="flex h-screen w-screen overflow-hidden bg-neutral-950 text-neutral-100">
-      <Sidebar
-        currentTab={currentTab}
-        onSelectTab={setCurrentTab}
-        vaultName={vaultInfo?.name || t.home.defaultVaultName}
-      />
+  if (viewMode === 'landing' && !isTauriEnvironment()) {
+    return <LandingView onEnterDemo={() => setViewMode('app')} />;
+  }
 
-      <div className="flex-1 flex flex-col h-screen overflow-hidden">
-        <Header
-          vaultInfo={vaultInfo}
-          currentTitle={getTitle()}
-          onOpenSearch={() => setIsSearchOpen(true)}
+  const isWebMode = !isTauriEnvironment();
+
+  return (
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-neutral-950 text-neutral-100">
+      {/* Top Banner when running in Web Demo Mode */}
+      {isWebMode && (
+        <div className="bg-neutral-900 border-b border-neutral-800 px-4 py-2 flex items-center justify-between text-xs text-neutral-300 shrink-0 z-40">
+          <div className="flex items-center gap-2">
+            <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-semibold text-emerald-400">Looma Web 演练模式</span>
+            <span className="hidden md:inline text-neutral-600">|</span>
+            <span className="hidden md:inline text-neutral-400">
+              数据保存在当前浏览器本地 (LocalStorage)，支持完整的新建、微调进度、手记与时光轴交互
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                if (window.confirm('确认重置所有演示数据为初始状态吗？')) {
+                  webVault.resetToDefault();
+                  loadData();
+                }
+              }}
+              className="px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs transition-colors cursor-pointer"
+              title="恢复初始预置的番剧、游戏、手记和图谱数据"
+            >
+              重置演练数据
+            </button>
+            <button
+              onClick={() => setViewMode('landing')}
+              className="px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium transition-colors cursor-pointer"
+            >
+              返回官网
+            </button>
+            <a
+              href="https://github.com/kirigayakazima/Looma/releases"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-sm shadow-emerald-500/20"
+            >
+              <span>下载客户端</span>
+            </a>
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar
+          currentTab={currentTab}
+          onSelectTab={setCurrentTab}
+          vaultName={vaultInfo?.name || t.home.defaultVaultName}
         />
 
-        <main className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 flex flex-col h-full overflow-hidden">
+          <Header
+            vaultInfo={vaultInfo}
+            currentTitle={getTitle()}
+            onOpenSearch={() => setIsSearchOpen(true)}
+          />
+
+          <main className="flex-1 overflow-y-auto p-6">
           {loading && !vaultInfo ? (
             <div className="flex items-center justify-center h-full text-neutral-500 text-xs">
               {t.common.initializing}
@@ -189,6 +243,7 @@ export const App: React.FC = () => {
           )}
         </main>
       </div>
+    </div>
 
       {/* Global Quick Search Modal */}
       <GlobalSearchModal
