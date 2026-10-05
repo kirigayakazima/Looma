@@ -350,11 +350,39 @@ fn create_work(
     status: String,
     original_title: Option<String>,
     description: Option<String>,
+    aliases: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<Entity, String> {
     let work_type = WorkType::parse(&kind);
     let record_status = RecordStatus::parse(&status);
-    state.core.create_work("desktop", &title, work_type, record_status, original_title, description)
+    let mut work = state.core.create_work("desktop", &title, work_type, record_status, original_title, description)
+        .map_err(|e| e.to_string())?;
+    if let Some(alias_list) = aliases {
+        if !alias_list.is_empty() {
+            work = state.core.update_work_aliases("desktop", &work.id, alias_list)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(work)
+}
+
+#[tauri::command]
+fn update_work_aliases(
+    id: String,
+    aliases: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Entity, String> {
+    state.core.update_work_aliases("desktop", &id, aliases)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_primary_external_reference(
+    entity_id: String,
+    reference_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ExternalReference>, String> {
+    state.core.set_primary_external_reference("desktop", &entity_id, &reference_id)
         .map_err(|e| e.to_string())
 }
 
@@ -594,6 +622,8 @@ pub fn run() {
             create_work,
             update_work_status,
             update_work_progress,
+            update_work_aliases,
+            set_primary_external_reference,
             update_work_cover_asset,
             ensure_directory_asset,
             link_work_directory,

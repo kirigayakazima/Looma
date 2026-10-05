@@ -231,6 +231,7 @@ export type RecordStatus =
   | 'paused'
   | 'dropped'
   | 'revisit'
+  | 'archived'
   | 'unknown';
 
 export type ProgressPositionType =
@@ -259,6 +260,8 @@ export interface WorkMetadata {
   cover_asset_id: string | null;
   rating: number | null;
   progress?: WorkProgress | null;
+  aliases?: string[];
+  type_metadata?: Record<string, unknown> | null;
 }
 
 export interface WorkSummary {

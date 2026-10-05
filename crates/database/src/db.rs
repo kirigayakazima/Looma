@@ -646,8 +646,9 @@ impl EntityService for LoomaDb {
             params_vec.push(Box::new(et.clone()));
         }
         if let Some(ref q) = filter.search_query {
-            query.push_str(" AND (title LIKE ? OR description LIKE ?)");
+            query.push_str(" AND (title LIKE ? OR description LIKE ? OR properties_json LIKE ?)");
             let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
             params_vec.push(Box::new(pattern.clone()));
             params_vec.push(Box::new(pattern));
         }

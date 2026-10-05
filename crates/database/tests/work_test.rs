@@ -752,3 +752,416 @@ fn test_missing_asset_integrity_and_generic_relocate() {
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
+
+#[test]
+fn test_v02_layer_isolation_and_metadata_purity() {
+    // Test A: Metadata layer contains only intrinsic work properties; progress is strictly in its own layer
+    let anime_meta = TypeSpecificMetadata::Anime(AnimeSpecificMeta {
+        season: Some("2024-10".to_string()),
+        total_episodes: Some(24),
+        anime_format: Some("tv".to_string()),
+        studio: Some("MAPPA".to_string()),
+        broadcast_day: Some("Friday".to_string()),
+    });
+
+    let mut work = Entity::new_work(
+        "咒术回战 第二季",
+        WorkType::Anime,
+        RecordStatus::InProgress,
+        Some("呪術廻戦 懐玉・玉折 / 渋谷事変".to_string()),
+        Some("五条悟与夏油杰的高专岁月及涩谷事变".to_string()),
+    ).with_type_metadata(anime_meta.clone());
+
+    let progress = WorkProgress {
+        position: 18.0,
+        position_type: ProgressPositionType::Episode,
+        total_positions: Some(23.0),
+        unit: Some("集".to_string()),
+        updated_at: Utc::now(),
+    };
+    work = work.with_progress(progress.clone());
+
+    let meta = work.as_work_metadata().expect("work metadata should parse");
+    // Layer 1: Identity
+    assert_eq!(work.title, "咒术回战 第二季");
+    assert_eq!(meta.work_type, WorkType::Anime);
+
+    // Layer 2: Metadata (pure, no progress or status or connections inside)
+    assert_eq!(meta.type_metadata, Some(anime_meta));
+
+    // Layer 3: Lifecycle
+    assert_eq!(meta.status, RecordStatus::InProgress);
+
+    // Layer 4: Progress (isolated)
+    assert_eq!(meta.progress.as_ref().unwrap().position, 18.0);
+    assert_eq!(meta.progress.as_ref().unwrap().total_positions, Some(23.0));
+}
+
+#[test]
+fn test_v02_status_and_progress_independence() {
+    // Test B: Updating progress MUST NOT unintentionally mutate or override lifecycle status
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work(
+        "test-suite",
+        "百年孤独",
+        WorkType::Book,
+        RecordStatus::Planned,
+        Some("Cien años de soledad".to_string()),
+        None,
+    ).unwrap();
+
+    let meta_initial = work.as_work_metadata().unwrap();
+    assert_eq!(meta_initial.status, RecordStatus::Planned);
+
+    // Update progress while status is Planned
+    let updated_prog = core.update_work_progress(
+        "test-suite",
+        &work.id,
+        50.0,
+        Some(ProgressPositionType::Page),
+        Some(400.0),
+        Some("页".to_string()),
+    ).unwrap();
+
+    let meta_after_prog = updated_prog.as_work_metadata().unwrap();
+    assert_eq!(meta_after_prog.status, RecordStatus::Planned, "Status MUST remain Planned when updating progress");
+    assert_eq!(meta_after_prog.progress.as_ref().unwrap().position, 50.0);
+
+    // Update status to InProgress, progress MUST remain intact
+    let updated_st = core.update_work_status("test-suite", &work.id, RecordStatus::InProgress).unwrap();
+    let meta_after_st = updated_st.as_work_metadata().unwrap();
+    assert_eq!(meta_after_st.status, RecordStatus::InProgress);
+    assert_eq!(meta_after_st.progress.as_ref().unwrap().position, 50.0);
+
+    // Archive work, progress MUST still remain intact
+    let updated_arch = core.update_work_status("test-suite", &work.id, RecordStatus::Archived).unwrap();
+    let meta_arch = updated_arch.as_work_metadata().unwrap();
+    assert_eq!(meta_arch.status, RecordStatus::Archived);
+    assert_eq!(meta_arch.progress.as_ref().unwrap().position, 50.0);
+}
+
+#[test]
+fn test_v02_work_multi_reference_and_primary_selection() {
+    // Test D: Multiple external references with unambiguous primary entry point
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work(
+        "test-suite",
+        "艾尔登法环",
+        WorkType::Game,
+        RecordStatus::Completed,
+        Some("ELDEN RING".to_string()),
+        None,
+    ).unwrap();
+
+    let ref_steam = ExternalReference {
+        id: "ref-steam-01".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "steam".to_string(),
+        title: "Steam Store Page".to_string(),
+        url: "https://store.steampowered.com/app/1245620/ELDEN_RING/".to_string(),
+        description: None,
+        metadata: json!({}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }.with_primary(true);
+
+    let ref_wiki = ExternalReference {
+        id: "ref-wiki-01".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "fextralife".to_string(),
+        title: "Elden Ring Wiki".to_string(),
+        url: "https://eldenring.wiki.fextralife.com/".to_string(),
+        description: None,
+        metadata: json!({}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    let ref_bili = ExternalReference {
+        id: "ref-bili-01".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "bilibili".to_string(),
+        title: "全收集流程攻略视频".to_string(),
+        url: "https://www.bilibili.com/video/BV111111".to_string(),
+        description: None,
+        metadata: json!({}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    core.create_external_reference("test-suite", &ref_steam).unwrap();
+    core.create_external_reference("test-suite", &ref_wiki).unwrap();
+    core.create_external_reference("test-suite", &ref_bili).unwrap();
+
+    let refs = core.list_external_references(Some(&work.id)).unwrap();
+    assert_eq!(refs.len(), 3);
+    let steam_found = refs.iter().find(|r| r.id == "ref-steam-01").unwrap();
+    let wiki_found = refs.iter().find(|r| r.id == "ref-wiki-01").unwrap();
+    assert!(steam_found.is_primary());
+    assert!(!wiki_found.is_primary());
+
+    // Switch primary to Wiki
+    core.set_primary_external_reference("test-suite", &work.id, "ref-wiki-01").unwrap();
+
+    let refs_switched = core.list_external_references(Some(&work.id)).unwrap();
+    let steam_switched = refs_switched.iter().find(|r| r.id == "ref-steam-01").unwrap();
+    let wiki_switched = refs_switched.iter().find(|r| r.id == "ref-wiki-01").unwrap();
+    assert!(!steam_switched.is_primary(), "Previous primary should be toggled off");
+    assert!(wiki_switched.is_primary(), "New primary should be active");
+}
+
+#[test]
+fn test_v02_work_universe_relation_identity() {
+    // Test E: Cross-medium universe relations (Adaptation, Sequel, Spin-off)
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let ln = core.create_work(
+        "test-suite",
+        "刀剑神域 (轻小说)",
+        WorkType::Novel,
+        RecordStatus::Completed,
+        Some("ソードアート・オンライン".to_string()),
+        None,
+    ).unwrap();
+
+    let anime = core.create_work(
+        "test-suite",
+        "刀剑神域 第一季 (动画)",
+        WorkType::Anime,
+        RecordStatus::Completed,
+        Some("Sword Art Online Season 1".to_string()),
+        None,
+    ).unwrap();
+
+    let spinoff = core.create_work(
+        "test-suite",
+        "刀剑神域外传 Gun Gale Online",
+        WorkType::Anime,
+        RecordStatus::Completed,
+        Some("Sword Art Online Alternative Gun Gale Online".to_string()),
+        None,
+    ).unwrap();
+
+    // 1. anime is ADAPTATION_OF ln
+    let rel_adapt = Relation {
+        id: uuid::Uuid::new_v4().to_string(),
+        source_id: anime.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::ADAPTATION_OF.to_string(),
+        target_id: ln.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    core.create_relation("test-suite", &rel_adapt).unwrap();
+
+    // 2. spinoff is SPIN_OFF_OF anime
+    let rel_spinoff = Relation {
+        id: uuid::Uuid::new_v4().to_string(),
+        source_id: spinoff.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::SPIN_OFF_OF.to_string(),
+        target_id: anime.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    core.create_relation("test-suite", &rel_spinoff).unwrap();
+
+    // Verify relations for anime
+    let anime_rels = core.list_relations_for_item(&anime.id).unwrap();
+    assert_eq!(anime_rels.len(), 2);
+    assert!(anime_rels.iter().any(|r| r.relation_type == relation_types::ADAPTATION_OF));
+    assert!(anime_rels.iter().any(|r| r.relation_type == relation_types::SPIN_OFF_OF));
+
+    // Confirm all 3 works maintain independent distinct identity and WorkType
+    assert_eq!(core.get_entity(&ln.id).unwrap().unwrap().entity_type, "novel");
+    assert_eq!(core.get_entity(&anime.id).unwrap().unwrap().entity_type, "anime");
+    assert_eq!(core.get_entity(&spinoff.id).unwrap().unwrap().entity_type, "anime");
+}
+
+#[test]
+fn test_v02_work_alias_matching_and_sqlite_query() {
+    // Test G: Work alias matching both in-memory and via SQLite LIKE search
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let mut work = core.create_work(
+        "test-suite",
+        "进击的巨人",
+        WorkType::Anime,
+        RecordStatus::Completed,
+        Some("進撃の巨人".to_string()),
+        Some("关于帕拉迪岛与艾伦耶格尔的史诗故事".to_string()),
+    ).unwrap();
+
+    work = core.update_work_aliases("test-suite", &work.id, vec![
+        "巨人".to_string(),
+        "Attack on Titan".to_string(),
+        "AOT".to_string(),
+        "Shingeki no Kyojin".to_string(),
+    ]).unwrap();
+
+    // In-memory query match
+    assert!(work.matches_query("AOT"));
+    assert!(work.matches_query("巨人"));
+    assert!(work.matches_query("attack on titan"));
+    assert!(work.matches_query("帕拉迪岛"));
+    assert!(work.matches_query("進撃"));
+    assert!(!work.matches_query("火影忍者"));
+
+    // SQLite search_query integration
+    let search_res = core.list_entities(&EntityFilter {
+        search_query: Some("Attack on Titan".to_string()),
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(search_res.len(), 1);
+    assert_eq!(search_res[0].id, work.id);
+
+    let search_res_alias = core.list_entities(&EntityFilter {
+        search_query: Some("AOT".to_string()),
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(search_res_alias.len(), 1);
+    assert_eq!(search_res_alias[0].id, work.id);
+}
+
+#[test]
+fn test_v02_restart_persistence_full_five_layers() {
+    // Test H: Complete 5-layer Work persistence across cold SQLite database reopen
+    let temp_dir = std::env::temp_dir().join(format!("looma_5layer_test_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db_path = temp_dir.join("vault.db");
+
+    let work_id = {
+        let db = Arc::new(LoomaDb::open(&db_path).unwrap());
+        let core = LoomaCore::new(db.clone());
+
+        // 1. Identity & Layer 2 Metadata
+        let anime_meta = TypeSpecificMetadata::Anime(AnimeSpecificMeta {
+            season: Some("2023-10".to_string()),
+            total_episodes: Some(28),
+            anime_format: Some("tv".to_string()),
+            studio: Some("Madhouse".to_string()),
+            broadcast_day: Some("Friday".to_string()),
+        });
+
+        let mut work = core.create_work(
+            "suite",
+            "葬送的芙莉莲",
+            WorkType::Anime,
+            RecordStatus::InProgress,
+            Some("葬送のフリーレン".to_string()),
+            Some("勇者击败魔王后的漫长冒险之旅".to_string()),
+        ).unwrap();
+
+        work = core.update_work_aliases("suite", &work.id, vec!["芙莉莲".to_string(), "Frieren".to_string()]).unwrap();
+        work = core.update_work_type_metadata("suite", &work.id, Some(anime_meta)).unwrap();
+
+        // 3. Lifecycle & 4. Progress
+        work = core.update_work_progress(
+            "suite",
+            &work.id,
+            16.0,
+            Some(ProgressPositionType::Episode),
+            Some(28.0),
+            Some("集".to_string()),
+        ).unwrap();
+
+        // 5. Connections: Asset
+        let asset = Asset {
+            id: "asset-frieren-01".to_string(),
+            kind: AssetKind::Image,
+            source: AssetSource::Local,
+            path: Some("C:/Looma/Frieren/poster.png".to_string()),
+            size: Some(1024),
+            hash: None,
+            mime_type: Some("image/png".to_string()),
+            metadata: json!({}),
+            status: AssetStatus::Active,
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            indexed_at: Utc::now(),
+        };
+        db.upsert_asset(&asset).unwrap();
+        core.link_work_asset("suite", &work.id, &asset.id, Some(relation_types::ATTACHES)).unwrap();
+
+        // 5. Connections: External Reference with Primary
+        let ext_ref = ExternalReference {
+            id: "ref-frieren-bgm".to_string(),
+            entity_id: Some(work.id.clone()),
+            provider: "bangumi".to_string(),
+            title: "Bangumi Frieren".to_string(),
+            url: "https://bgm.tv/subject/399894".to_string(),
+            description: None,
+            metadata: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }.with_primary(true);
+        core.create_external_reference("suite", &ext_ref).unwrap();
+
+        // 5. Connections: Memory
+        let mem = Memory {
+            id: "mem-frieren-01".to_string(),
+            title: "芙莉莲微小魔法的浪漫".to_string(),
+            content: "开出花田的魔法，贯穿了千年的温柔。".to_string(),
+            category: Some("review".to_string()),
+            metadata: json!({}),
+            recorded_at: Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        core.create_memory("suite", &mem).unwrap();
+        core.link_work_memory("suite", &work.id, &mem.id).unwrap();
+
+        work.id
+    };
+
+    // --- COLD RESTART: Reopen disk SQLite from path ---
+    {
+        let db_reopened = Arc::new(LoomaDb::open(&db_path).unwrap());
+        let core_reopened = LoomaCore::new(db_reopened);
+
+        let summary = core_reopened.get_work_summary(&work_id).unwrap().expect("Work summary must survive restart");
+
+        // Assert Layer 1: Identity
+        assert_eq!(summary.entity.id, work_id);
+        assert_eq!(summary.entity.title, "葬送的芙莉莲");
+        let meta = summary.work_metadata.as_ref().unwrap();
+        assert_eq!(meta.work_type, WorkType::Anime);
+        assert_eq!(meta.original_title.as_deref(), Some("葬送のフリーレン"));
+        assert_eq!(meta.aliases, vec!["芙莉莲".to_string(), "Frieren".to_string()]);
+
+        // Assert Layer 2: Metadata
+        if let Some(TypeSpecificMetadata::Anime(anime_spec)) = &meta.type_metadata {
+            assert_eq!(anime_spec.studio.as_deref(), Some("Madhouse"));
+            assert_eq!(anime_spec.total_episodes, Some(28));
+        } else {
+            panic!("Expected anime type metadata overlay to survive restart");
+        }
+
+        // Assert Layer 3: Lifecycle
+        assert_eq!(meta.status, RecordStatus::InProgress);
+
+        // Assert Layer 4: Progress
+        let prog = meta.progress.as_ref().unwrap();
+        assert_eq!(prog.position, 16.0);
+        assert_eq!(prog.total_positions, Some(28.0));
+        assert_eq!(prog.unit.as_deref(), Some("集"));
+
+        // Assert Layer 5: Connections
+        assert_eq!(summary.linked_assets.len(), 1);
+        assert_eq!(summary.linked_assets[0].id, "asset-frieren-01");
+        assert_eq!(summary.linked_memories.len(), 1);
+        assert_eq!(summary.linked_memories[0].id, "mem-frieren-01");
+        assert_eq!(summary.external_references.len(), 1);
+        assert!(summary.external_references[0].is_primary());
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

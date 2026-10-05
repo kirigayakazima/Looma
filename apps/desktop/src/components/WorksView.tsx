@@ -60,6 +60,7 @@ export const WorksView: React.FC<WorksViewProps> = ({
   // Create Form State
   const [newTitle, setNewTitle] = useState('');
   const [newOrigTitle, setNewOrigTitle] = useState('');
+  const [newAliases, setNewAliases] = useState('');
   const [newType, setNewType] = useState<WorkType>('anime');
   const [newStatus, setNewStatus] = useState<RecordStatus>('in_progress');
   const [newDesc, setNewDesc] = useState('');
@@ -70,6 +71,7 @@ export const WorksView: React.FC<WorksViewProps> = ({
   const [refProvider, setRefProvider] = useState('bilibili');
   const [refTitle, setRefTitle] = useState('');
   const [refUrl, setRefUrl] = useState('');
+  const [refIsPrimary, setRefIsPrimary] = useState(false);
   const [addingRef, setAddingRef] = useState(false);
 
   // Link Asset Search
@@ -173,12 +175,14 @@ export const WorksView: React.FC<WorksViewProps> = ({
     setCreating(true);
     try {
       const totalNum = newTotalPos ? parseFloat(newTotalPos) : null;
+      const aliasList = newAliases.split(/[,，]/).map(s => s.trim()).filter(Boolean);
       const created = await safeInvoke<Entity>('create_work', {
         title: newTitle.trim(),
         kind: newType,
         status: newStatus,
         originalTitle: newOrigTitle.trim() || null,
         description: newDesc.trim() || null,
+        aliases: aliasList.length > 0 ? aliasList : null,
       });
 
       if (created) {
@@ -195,6 +199,7 @@ export const WorksView: React.FC<WorksViewProps> = ({
       setShowCreateModal(false);
       setNewTitle('');
       setNewOrigTitle('');
+      setNewAliases('');
       setNewDesc('');
       setNewTotalPos('');
       await loadWorks();
@@ -217,18 +222,35 @@ export const WorksView: React.FC<WorksViewProps> = ({
         title: refTitle.trim(),
         url: refUrl.trim(),
         description: null,
-        metadata: {},
+        metadata: refIsPrimary ? { is_primary: true } : {},
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
       await safeInvoke('create_external_reference', { reference: newRef });
+      if (refIsPrimary && activeWorkId) {
+        await safeInvoke('set_primary_external_reference', {
+          entityId: activeWorkId,
+          referenceId: newRef.id,
+        });
+      }
       setShowAddRefModal(false);
       setRefTitle('');
       setRefUrl('');
+      setRefIsPrimary(false);
       await loadWorkSummary(activeWorkId);
     } finally {
       setAddingRef(false);
     }
+  };
+
+  // Set Primary External Reference
+  const handleSetPrimaryRef = async (refId: string) => {
+    if (!activeWorkId) return;
+    await safeInvoke('set_primary_external_reference', {
+      entityId: activeWorkId,
+      referenceId: refId,
+    });
+    await loadWorkSummary(activeWorkId);
   };
 
   // Delete External Reference
@@ -310,7 +332,8 @@ export const WorksView: React.FC<WorksViewProps> = ({
       const titleMatch = w.title.toLowerCase().includes(q);
       const origMatch = (meta?.original_title || '').toLowerCase().includes(q);
       const descMatch = (w.description || '').toLowerCase().includes(q);
-      return titleMatch || origMatch || descMatch;
+      const aliasMatch = Array.isArray(meta?.aliases) && meta.aliases.some((a: string) => a.toLowerCase().includes(q));
+      return titleMatch || origMatch || descMatch || aliasMatch;
     });
   }, [works, searchQuery]);
 
@@ -387,6 +410,12 @@ export const WorksView: React.FC<WorksViewProps> = ({
             <span>已放弃</span>
           </span>
         );
+      case 'archived':
+        return (
+          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-xs font-medium bg-neutral-800 text-neutral-400 border border-neutral-700/50">
+            <span>已封存</span>
+          </span>
+        );
       default:
         return (
           <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full text-xs font-medium bg-neutral-800 text-neutral-400">
@@ -457,6 +486,7 @@ export const WorksView: React.FC<WorksViewProps> = ({
               { id: 'planned', label: '计划中' },
               { id: 'completed', label: '已完成' },
               { id: 'paused', label: '搁置' },
+              { id: 'archived', label: '已封存' },
             ].map((item) => (
               <button
                 key={item.id}
@@ -534,6 +564,20 @@ export const WorksView: React.FC<WorksViewProps> = ({
                     <p className="text-xs text-neutral-500 line-clamp-1 mt-0.5">
                       {meta.original_title}
                     </p>
+                  )}
+                  {meta?.aliases && meta.aliases.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {meta.aliases.slice(0, 2).map((alias: string, i: number) => (
+                        <span key={i} className="text-[10px] px-1.5 py-0.2 rounded bg-neutral-800 text-neutral-400 border border-neutral-700/50">
+                          {alias}
+                        </span>
+                      ))}
+                      {meta.aliases.length > 2 && (
+                        <span className="text-[10px] text-neutral-500">
+                          +{meta.aliases.length - 2}
+                        </span>
+                      )}
+                    </div>
                   )}
 
                   {work.description && (
@@ -644,6 +688,15 @@ export const WorksView: React.FC<WorksViewProps> = ({
                       {activeSummary.work_metadata.original_title}
                     </p>
                   )}
+                  {activeSummary?.work_metadata?.aliases && activeSummary.work_metadata.aliases.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {activeSummary.work_metadata.aliases.map((alias, idx) => (
+                        <span key={idx} className="text-[10px] px-1.5 py-0.2 rounded bg-neutral-800 text-neutral-300 border border-neutral-700/50">
+                          {alias}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -736,31 +789,56 @@ export const WorksView: React.FC<WorksViewProps> = ({
                       </p>
                     ) : (
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {activeSummary.external_references.map((ref) => (
-                          <div
-                            key={ref.id}
-                            className="flex items-center justify-between p-2.5 rounded-lg bg-neutral-950/60 border border-neutral-800 hover:border-neutral-700 transition-colors"
-                          >
+                        {activeSummary.external_references.map((ref) => {
+                          const isPrimary = (ref.metadata as any)?.is_primary === true || (ref.metadata as any)?.primary === true;
+                          return (
                             <div
-                              onClick={() => handleOpenUrl(ref.url)}
-                              className="flex items-center space-x-2 flex-1 cursor-pointer truncate"
+                              key={ref.id}
+                              className={`flex items-center justify-between p-2.5 rounded-lg border transition-colors ${
+                                isPrimary
+                                  ? 'bg-indigo-950/20 border-indigo-500/40 hover:border-indigo-500/60'
+                                  : 'bg-neutral-950/60 border border-neutral-800 hover:border-neutral-700'
+                              }`}
                             >
-                              <ExternalLink className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                              <div className="truncate">
-                                <p className="text-xs font-medium text-neutral-200 truncate">
-                                  {ref.title}
-                                </p>
-                                <p className="text-[11px] text-neutral-500 truncate">{ref.url}</p>
+                              <div
+                                onClick={() => handleOpenUrl(ref.url)}
+                                className="flex items-center space-x-2 flex-1 cursor-pointer truncate mr-2"
+                              >
+                                <ExternalLink className={`w-3.5 h-3.5 shrink-0 ${isPrimary ? 'text-indigo-300' : 'text-indigo-400'}`} />
+                                <div className="truncate">
+                                  <div className="flex items-center space-x-1.5 truncate">
+                                    <p className="text-xs font-medium text-neutral-200 truncate">
+                                      {ref.title}
+                                    </p>
+                                    {isPrimary && (
+                                      <span className="shrink-0 text-[10px] px-1 py-0.2 rounded bg-indigo-500/30 text-indigo-200 border border-indigo-500/40 font-medium">
+                                        🔗 主入口
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] text-neutral-500 truncate">{ref.url}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-center space-x-1 shrink-0">
+                                {!isPrimary && (
+                                  <button
+                                    onClick={() => handleSetPrimaryRef(ref.id)}
+                                    className="p-1 text-neutral-500 hover:text-indigo-400 transition-colors cursor-pointer"
+                                    title="设为主入口"
+                                  >
+                                    <LinkIcon className="w-3 h-3" />
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleDeleteRef(ref.id)}
+                                  className="p-1 text-neutral-500 hover:text-rose-400 transition-colors cursor-pointer"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
                               </div>
                             </div>
-                            <button
-                              onClick={() => handleDeleteRef(ref.id)}
-                              className="p-1 text-neutral-500 hover:text-rose-400 transition-colors"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -996,6 +1074,7 @@ export const WorksView: React.FC<WorksViewProps> = ({
                     <option value="planned">计划中 (想看/想玩)</option>
                     <option value="completed">已完成 (通关/看完)</option>
                     <option value="paused">搁置中</option>
+                    <option value="archived">已封存 / 归档</option>
                   </select>
                 </div>
 
@@ -1011,6 +1090,19 @@ export const WorksView: React.FC<WorksViewProps> = ({
                     className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-neutral-300 block mb-1">
+                  别名 / 译名 / 简称 (逗号分隔)
+                </label>
+                <input
+                  type="text"
+                  value={newAliases}
+                  onChange={(e) => setNewAliases(e.target.value)}
+                  placeholder="例如：死神, 死神千年血战, Bleach TYBW"
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-indigo-500"
+                />
               </div>
 
               <div>
@@ -1104,6 +1196,19 @@ export const WorksView: React.FC<WorksViewProps> = ({
                   placeholder="https://..."
                   className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-100 font-mono"
                 />
+              </div>
+
+              <div className="flex items-center space-x-2 pt-1">
+                <input
+                  type="checkbox"
+                  id="refIsPrimary"
+                  checked={refIsPrimary}
+                  onChange={(e) => setRefIsPrimary(e.target.checked)}
+                  className="rounded border-neutral-800 text-indigo-600 focus:ring-0 cursor-pointer"
+                />
+                <label htmlFor="refIsPrimary" className="text-xs text-neutral-300 cursor-pointer select-none">
+                  设为此作品的主入口 (Primary Reference)
+                </label>
               </div>
             </div>
 

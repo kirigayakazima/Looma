@@ -70,6 +70,7 @@ pub enum RecordStatus {
     Paused,
     Dropped,
     Revisit,
+    Archived,
     Unknown,
 }
 
@@ -82,6 +83,7 @@ impl RecordStatus {
             Self::Paused => "paused",
             Self::Dropped => "dropped",
             Self::Revisit => "revisit",
+            Self::Archived => "archived",
             Self::Unknown => "unknown",
         }
     }
@@ -94,6 +96,7 @@ impl RecordStatus {
             "paused" | "on_hold" => Self::Paused,
             "dropped" | "abandoned" => Self::Dropped,
             "revisit" | "rewatch" | "replay" => Self::Revisit,
+            "archived" | "archive" => Self::Archived,
             _ => Self::Unknown,
         }
     }
@@ -116,6 +119,9 @@ pub mod relation_types {
     pub const SEQUEL_OF: &str = "sequel_of";
     pub const PREQUEL_OF: &str = "prequel_of";
     pub const PART_OF: &str = "part_of";
+    pub const SPIN_OFF_OF: &str = "spin_off_of";
+    pub const REMAKE_OF: &str = "remake_of";
+    pub const BASED_ON: &str = "based_on";
     pub const RELATED_TO: &str = "related_to";
     pub const INSPIRED_BY: &str = "inspired_by";
     pub const FEATURES: &str = "features";
@@ -295,6 +301,8 @@ pub struct WorkMetadata {
     pub progress: Option<WorkProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_metadata: Option<TypeSpecificMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 impl Default for WorkMetadata {
@@ -310,6 +318,7 @@ impl Default for WorkMetadata {
             rating: None,
             progress: None,
             type_metadata: None,
+            aliases: Vec::new(),
         }
     }
 }
@@ -334,6 +343,7 @@ impl Entity {
             rating: None,
             progress: None,
             type_metadata: None,
+            aliases: Vec::new(),
         };
 
         Self {
@@ -456,10 +466,67 @@ impl Entity {
                 rating: None,
                 progress: None,
                 type_metadata: None,
+                aliases: Vec::new(),
             });
         }
 
         None
+    }
+
+    /// Attach aliases to this work
+    pub fn with_aliases(mut self, aliases: Vec<String>) -> Self {
+        self.set_aliases(aliases);
+        self
+    }
+
+    /// Set or update aliases on work metadata and properties
+    pub fn set_aliases(&mut self, aliases: Vec<String>) {
+        if let Some(obj) = self.properties.as_object_mut() {
+            if let Some(work_val) = obj.get_mut("work") {
+                if let Some(work_obj) = work_val.as_object_mut() {
+                    if aliases.is_empty() {
+                        work_obj.remove("aliases");
+                    } else {
+                        work_obj.insert("aliases".to_string(), json!(aliases));
+                    }
+                }
+            }
+            if aliases.is_empty() {
+                obj.remove("aliases");
+            } else {
+                obj.insert("aliases".to_string(), json!(aliases));
+            }
+            self.updated_at = Utc::now();
+        }
+    }
+
+    /// Match entity against a search query across title, description, original_title, and aliases
+    pub fn matches_query(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        if self.title.to_lowercase().contains(&q) {
+            return true;
+        }
+        if let Some(desc) = &self.description {
+            if desc.to_lowercase().contains(&q) {
+                return true;
+            }
+        }
+        if let Some(meta) = self.as_work_metadata() {
+            if let Some(orig) = &meta.original_title {
+                if orig.to_lowercase().contains(&q) {
+                    return true;
+                }
+            }
+            for alias in &meta.aliases {
+                if alias.to_lowercase().contains(&q) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Attach type-specific metadata overlay to this work

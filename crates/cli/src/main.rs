@@ -204,18 +204,27 @@ enum WorkCommands {
         title: String,
         #[arg(short = 't', long, default_value = "anime", help = "Work type (anime, game, movie, book, project, etc.)")]
         kind: String,
-        #[arg(short, long, default_value = "planned", help = "Status (planned, in_progress, completed, paused, dropped, revisit)")]
+        #[arg(short, long, default_value = "planned", help = "Status (planned, in_progress, completed, paused, dropped, revisit, archived)")]
         status: String,
         #[arg(long, help = "Original native title")]
         orig: Option<String>,
         #[arg(short, long, help = "Description or synopsis")]
         desc: Option<String>,
+        #[arg(long, value_delimiter = ',', help = "Alternative titles or aliases (comma-separated)")]
+        aliases: Vec<String>,
+    },
+    #[command(about = "Add an alias title to a work")]
+    Alias {
+        #[arg(help = "Work Entity ID")]
+        id: String,
+        #[arg(help = "Alias to add")]
+        alias: String,
     },
     #[command(about = "Update consumption status of a work")]
     Status {
         #[arg(help = "Work Entity ID")]
         id: String,
-        #[arg(help = "New status (planned, in_progress, completed, paused, dropped, revisit)")]
+        #[arg(help = "New status (planned, in_progress, completed, paused, dropped, revisit, archived)")]
         status: String,
     },
     #[command(about = "Update consumption progress (episode, chapter, page, percentage)")]
@@ -280,6 +289,15 @@ enum RefCommands {
         title: Option<String>,
         #[arg(short, long, help = "Associated Entity ID")]
         entity_id: Option<String>,
+        #[arg(long, help = "Mark this reference as primary entry point")]
+        primary: bool,
+    },
+    #[command(about = "Set an external reference as primary for its entity")]
+    Primary {
+        #[arg(help = "Work Entity ID")]
+        entity_id: String,
+        #[arg(help = "Reference ID to mark as primary")]
+        reference_id: String,
     },
     #[command(about = "Delete an external reference by ID")]
     Delete {
@@ -504,11 +522,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            WorkCommands::Create { title, kind, status, orig, desc } => {
+            WorkCommands::Create { title, kind, status, orig, desc, aliases } => {
                 let work_type = WorkType::parse(&kind);
                 let record_status = RecordStatus::parse(&status);
-                let work = core.create_work("cli", &title, work_type, record_status, orig, desc)?;
+                let mut work = core.create_work("cli", &title, work_type, record_status, orig, desc)?;
+                if !aliases.is_empty() {
+                    work = core.update_work_aliases("cli", &work.id, aliases)?;
+                }
                 println!("Registered new work: {} [{}] ({}) ID: {}", title, work_type.as_str(), record_status.as_str(), work.id);
+            }
+            WorkCommands::Alias { id, alias } => {
+                let entity = core.get_entity(&id)?
+                    .ok_or_else(|| looma_core::LoomaError::NotFound(format!("Work entity not found: {id}")))?;
+                let mut existing_aliases = entity.as_work_metadata().map(|m| m.aliases).unwrap_or_default();
+                if !existing_aliases.contains(&alias) {
+                    existing_aliases.push(alias.clone());
+                }
+                let updated = core.update_work_aliases("cli", &id, existing_aliases)?;
+                let aliases_now = updated.as_work_metadata().map(|m| m.aliases).unwrap_or_default();
+                println!("Updated aliases for {}: {:?}", updated.title, aliases_now);
             }
             WorkCommands::Status { id, status } => {
                 let record_status = RecordStatus::parse(&status);
@@ -539,6 +571,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  ID:     {}", w.id);
                     println!("  Status: {}", st);
                     if let Some(m) = meta {
+                        if !m.aliases.is_empty() {
+                            println!("  Aliases: {}", m.aliases.join(", "));
+                        }
                         if let Some(p) = &m.progress {
                             let u = p.unit.as_deref().unwrap_or(p.position_type.as_str());
                             if let Some(t) = p.total_positions {
@@ -570,7 +605,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     println!("  External References ({})", summary.external_references.len());
                     for r in &summary.external_references {
-                        println!("    - [{}] {} -> {}", r.provider, r.title, r.url);
+                        let primary_tag = if r.is_primary() { " [PRIMARY]" } else { "" };
+                        println!("    - [{}] {}{} -> {}", r.provider, r.title, primary_tag, r.url);
                     }
                     println!("======================================================");
                 } else {
@@ -644,13 +680,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let refs = core.list_external_references(entity_id.as_deref())?;
                 println!("External References ({}):\n", refs.len());
                 for r in refs {
-                    println!("  [{}] {} -> {} (ID: {})", r.provider, r.title, r.url, r.id);
+                    let primary_tag = if r.is_primary() { " [PRIMARY]" } else { "" };
+                    println!("  [{}] {}{} -> {} (ID: {})", r.provider, r.title, primary_tag, r.url, r.id);
                 }
             }
-            RefCommands::Add { provider, url, title, entity_id } => {
+            RefCommands::Add { provider, url, title, entity_id, primary } => {
                 let ext_ref = ExternalReference {
                     id: format!("ref_{}", &uuid::Uuid::new_v4().to_string()[..8]),
-                    entity_id,
+                    entity_id: entity_id.clone(),
                     provider,
                     title: title.unwrap_or_else(|| url.clone()),
                     url: url.clone(),
@@ -658,9 +695,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     metadata: json!({}),
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
-                };
+                }.with_primary(primary);
                 core.create_external_reference("cli", &ext_ref)?;
-                println!("Created external reference: {} (ID: {})", ext_ref.url, ext_ref.id);
+                if primary {
+                    if let Some(ref eid) = entity_id {
+                        let _ = core.set_primary_external_reference("cli", eid, &ext_ref.id);
+                    }
+                }
+                println!("Created external reference: {} (ID: {}, Primary: {})", ext_ref.url, ext_ref.id, primary);
+            }
+            RefCommands::Primary { entity_id, reference_id } => {
+                let updated = core.set_primary_external_reference("cli", &entity_id, &reference_id)?;
+                println!("Set reference {} as primary for entity {}. Total references: {}", reference_id, entity_id, updated.len());
             }
             RefCommands::Delete { id } => {
                 let deleted = core.delete_external_reference("cli", &id)?;

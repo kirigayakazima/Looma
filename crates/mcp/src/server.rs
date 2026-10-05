@@ -479,9 +479,22 @@ impl McpServer {
                         "url": { "type": "string", "description": "External target URL" },
                         "title": { "type": "string", "description": "Optional human-readable title" },
                         "external_id": { "type": "string", "description": "Optional provider-native ID (e.g. repo name or video bvid)" },
+                        "is_primary": { "type": "boolean", "description": "Whether this reference is the primary entry point for the work" },
                         "metadata": { "type": "object", "description": "Optional provider specific metadata" }
                     },
                     "required": ["entity_id", "provider", "url"]
+                }
+            }),
+            json!({
+                "name": "set_primary_external_reference",
+                "description": "[MetadataWrite] Set a specific external reference as the primary reference for a work entity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entity_id": { "type": "string", "description": "Work Entity ID" },
+                        "reference_id": { "type": "string", "description": "External reference ID to mark as primary" }
+                    },
+                    "required": ["entity_id", "reference_id"]
                 }
             }),
             json!({
@@ -503,9 +516,10 @@ impl McpServer {
                     "properties": {
                         "title": { "type": "string", "description": "Work title" },
                         "work_type": { "type": "string", "description": "Medium type: game | anime | manga | book | movie | tv_series | music | project | other" },
-                        "status": { "type": "string", "description": "Status: planned | in_progress | completed | paused | dropped | revisit" },
+                        "status": { "type": "string", "description": "Status: planned | in_progress | completed | paused | dropped | revisit | archived" },
                         "original_title": { "type": "string", "description": "Optional native original title" },
-                        "description": { "type": "string", "description": "Optional synopsis or description" }
+                        "description": { "type": "string", "description": "Optional synopsis or description" },
+                        "aliases": { "type": "array", "items": { "type": "string" }, "description": "Optional list of alias titles or alternative names" }
                     },
                     "required": ["title", "work_type"]
                 }
@@ -798,6 +812,7 @@ impl McpServer {
                         rating: args.get("rating").and_then(|v| v.as_f64()).map(|f| f as f32),
                         progress: None,
                         type_metadata: None,
+                        aliases: Vec::new(),
                     });
                 }
 
@@ -882,7 +897,13 @@ impl McpServer {
                 let url = args.get("url").and_then(|v| v.as_str()).ok_or("Missing url")?;
                 let title = args.get("title").and_then(|v| v.as_str()).unwrap_or(url);
                 let desc = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let meta = args.get("metadata").cloned().unwrap_or(json!({}));
+                let is_primary = args.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false);
+                let mut meta = args.get("metadata").cloned().unwrap_or(json!({}));
+                if is_primary {
+                    if let Some(obj) = meta.as_object_mut() {
+                        obj.insert("is_primary".to_string(), json!(true));
+                    }
+                }
 
                 let ext_ref = ExternalReference {
                     id: format!("ref_{}", &uuid::Uuid::new_v4().to_string()[..8]),
@@ -899,6 +920,14 @@ impl McpServer {
                 serde_json::to_string_pretty(&ext_ref).map_err(|e| e.to_string())
             }
 
+            "set_primary_external_reference" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "set_primary_external_reference")?;
+                let entity_id = args.get("entity_id").and_then(|v| v.as_str()).ok_or("Missing entity_id")?;
+                let reference_id = args.get("reference_id").and_then(|v| v.as_str()).ok_or("Missing reference_id")?;
+                let updated = self.core.set_primary_external_reference("mcp", entity_id, reference_id).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())
+            }
+
             "ensure_directory_asset" => {
                 self.check_permission(McpPermissionLevel::MetadataWrite, "ensure_directory_asset")?;
                 let path = args.get("path").and_then(|v| v.as_str()).ok_or("Missing path")?;
@@ -913,11 +942,19 @@ impl McpServer {
                 let status_str = args.get("status").and_then(|v| v.as_str()).unwrap_or("planned");
                 let orig_title = args.get("original_title").and_then(|v| v.as_str()).map(|s| s.to_string());
                 let desc = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let aliases: Option<Vec<String>> = args.get("aliases")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(|str_val| str_val.to_string())).collect());
 
                 let work_type = WorkType::parse(work_type_str);
                 let status = RecordStatus::parse(status_str);
 
-                let work = self.core.create_work("mcp", title, work_type, status, orig_title, desc).map_err(|e| e.to_string())?;
+                let mut work = self.core.create_work("mcp", title, work_type, status, orig_title, desc).map_err(|e| e.to_string())?;
+                if let Some(alias_list) = aliases {
+                    if !alias_list.is_empty() {
+                        work = self.core.update_work_aliases("mcp", &work.id, alias_list).map_err(|e| e.to_string())?;
+                    }
+                }
                 serde_json::to_string_pretty(&work).map_err(|e| e.to_string())
             }
 

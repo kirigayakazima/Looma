@@ -315,16 +315,23 @@ impl LoomaCore {
 
         let mut props = entity.properties.clone();
         if let Some(obj) = props.as_object_mut() {
+            let existing_status = entity.as_work_metadata().map(|m| m.status).unwrap_or_else(|| {
+                entity.properties.get("status")
+                    .and_then(|v| v.as_str())
+                    .map(RecordStatus::parse)
+                    .unwrap_or(RecordStatus::Planned)
+            });
+
             let mut work_meta: WorkMetadata = if let Some(w) = obj.get("work") {
                 serde_json::from_value(w.clone()).unwrap_or_else(|_| WorkMetadata {
                     work_type: WorkType::parse(&entity.entity_type),
-                    status: RecordStatus::InProgress,
+                    status: existing_status,
                     ..Default::default()
                 })
             } else {
                 WorkMetadata {
                     work_type: WorkType::parse(&entity.entity_type),
-                    status: RecordStatus::InProgress,
+                    status: existing_status,
                     ..Default::default()
                 }
             };
@@ -376,6 +383,70 @@ impl LoomaCore {
         );
 
         Ok(entity)
+    }
+
+    pub fn update_work_aliases(
+        &self,
+        actor: &str,
+        entity_id: &str,
+        aliases: Vec<String>,
+    ) -> LoomaResult<Entity> {
+        let mut entity = self.get_entity(entity_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity not found: {entity_id}")))?;
+
+        entity.set_aliases(aliases.clone());
+        self.update_entity(actor, &entity)?;
+
+        self.record_audit(
+            actor,
+            "work.aliases_update",
+            "entity",
+            entity_id,
+            "success",
+            json!({ "aliases": aliases }),
+        )?;
+
+        self.emit_event(
+            actor,
+            DomainEvent::EntityUpdated { id: entity_id.to_string() },
+        );
+
+        Ok(entity)
+    }
+
+    pub fn set_primary_external_reference(
+        &self,
+        actor: &str,
+        entity_id: &str,
+        reference_id: &str,
+    ) -> LoomaResult<Vec<ExternalReference>> {
+        let refs = self.list_external_references(Some(entity_id))?;
+        if !refs.iter().any(|r| r.id == reference_id) {
+            return Err(LoomaError::NotFound(format!(
+                "External reference {reference_id} not found for entity {entity_id}"
+            )));
+        }
+
+        let mut updated = Vec::new();
+        for mut r in refs {
+            let should_be_primary = r.id == reference_id;
+            if r.is_primary() != should_be_primary {
+                r.set_primary(should_be_primary);
+                self.update_external_reference(actor, &r)?;
+            }
+            updated.push(r);
+        }
+
+        self.record_audit(
+            actor,
+            "work.set_primary_external_reference",
+            "entity",
+            entity_id,
+            "success",
+            json!({ "primary_reference_id": reference_id }),
+        )?;
+
+        Ok(updated)
     }
 
     pub fn update_work_cover_asset(
