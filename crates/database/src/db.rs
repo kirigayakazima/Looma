@@ -939,6 +939,18 @@ impl RelationService for LoomaDb {
 
     fn create_relation(&self, relation: &Relation) -> LoomaResult<()> {
         let conn = self.conn.lock();
+        // Logical relation identity: (source_id, relation_type, target_id)
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM relations WHERE source_id = ?1 AND relation_type = ?2 AND target_id = ?3",
+                params![relation.source_id, relation.relation_type, relation.target_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        if exists > 0 {
+            return Ok(()); // Idempotent success
+        }
+
         let meta_str = serde_json::to_string(&relation.metadata).unwrap_or_else(|_| "{}".to_string());
         conn.execute(
             "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)

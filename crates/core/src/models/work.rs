@@ -606,6 +606,43 @@ pub struct WorkSummary {
     pub external_references: Vec<ExternalReference>,
 }
 
+/// Integrity violation item detected on a Work entity
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrityViolation {
+    pub kind: String,
+    pub message: String,
+}
+
+impl IntegrityViolation {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Integrity check report summarizing invariant checks for a Work entity
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrityReport {
+    pub valid: bool,
+    pub violations: Vec<IntegrityViolation>,
+}
+
+impl IntegrityReport {
+    pub fn ok() -> Self {
+        Self {
+            valid: true,
+            violations: Vec::new(),
+        }
+    }
+
+    pub fn with_violations(violations: Vec<IntegrityViolation>) -> Self {
+        let valid = violations.is_empty();
+        Self { valid, violations }
+    }
+}
+
 /// Architectural alias: A Work Profile represents the complete unified digital footprint for any medium.
 pub type WorkProfile = WorkSummary;
 

@@ -549,6 +549,17 @@ impl McpServer {
                     "required": ["work_id", "old_asset_id", "new_path"]
                 }
             }),
+            json!({
+                "name": "check_work_integrity",
+                "description": "[ReadOnly] Validate data integrity, attachment direction, and invariants for a work entity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "work_id": { "type": "string", "description": "Work Entity ID" }
+                    },
+                    "required": ["work_id"]
+                }
+            }),
 
             // Content write tools
             json!({
@@ -975,6 +986,13 @@ impl McpServer {
                 let (asset, rel) = self.core.relocate_work_directory("mcp", work_id, old_asset_id, new_path).map_err(|e| e.to_string())?;
                 let res = json!({ "asset": asset, "relation": rel });
                 serde_json::to_string_pretty(&res).map_err(|e| e.to_string())
+            }
+
+            "check_work_integrity" => {
+                self.check_permission(McpPermissionLevel::ReadOnly, "check_work_integrity")?;
+                let work_id = args.get("work_id").and_then(|v| v.as_str()).ok_or("Missing work_id")?;
+                let report = self.core.validate_work_integrity(work_id).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
             }
 
             // Content write tools

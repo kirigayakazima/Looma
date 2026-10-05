@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use chrono::Utc;
 use looma_core::models::*;
-use looma_core::services::AssetService;
+use looma_core::services::{AssetService, ExternalReferenceService, RelationService};
 use looma_core::LoomaCore;
 use looma_database::LoomaDb;
 use serde_json::json;
@@ -2140,5 +2140,777 @@ fn test_v04_primary_write_path_consistency() {
     assert_eq!(count3, 1, "MCP set_primary must maintain exactly 1 primary");
     assert_eq!(refs3.iter().find(|r| r.is_primary()).unwrap().id, "ref_path_1");
 }
+
+// ==============================================================================
+// v0.5 Hardening Tests: AA - AO (Invariant & Concurrency Integrity)
+// ==============================================================================
+
+#[test]
+fn test_v05_work_directory_attachment_query_strictness() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v05_aa_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Query Strictness Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+
+    // 1. Valid Directory Asset linked via attaches
+    let dir_path = temp_dir.join("anime_dir");
+    std::fs::create_dir_all(&dir_path).unwrap();
+    let (dir_asset, _) = core.link_work_directory("suite", &work.id, &dir_path.to_string_lossy()).unwrap();
+
+    // 2. Non-directory asset linked via attaches
+    let doc_asset = Asset {
+        id: "doc_asset_01".to_string(),
+        kind: AssetKind::Document,
+        source: AssetSource::Local,
+        path: Some(temp_dir.join("doc.pdf").to_string_lossy().to_string()),
+        size: Some(1024),
+        hash: None,
+        mime_type: Some("application/pdf".to_string()),
+        metadata: json!({}),
+        status: AssetStatus::Active,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        indexed_at: Utc::now(),
+    };
+    db.upsert_asset(&doc_asset).unwrap();
+    let doc_rel = Relation {
+        id: "rel_doc_01".to_string(),
+        source_id: work.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::ATTACHES.to_string(),
+        target_id: doc_asset.id.clone(),
+        target_type: "asset".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&doc_rel).unwrap();
+
+    // 3. Reverse attaches relation: Asset -> Work
+    let rev_rel = Relation {
+        id: "rel_rev_01".to_string(),
+        source_id: dir_asset.id.clone(),
+        source_type: "asset".to_string(),
+        relation_type: relation_types::ATTACHES.to_string(),
+        target_id: work.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&rev_rel).unwrap();
+
+    // 4. References relation: Work -> dir_asset
+    let ref_rel = Relation {
+        id: "rel_ref_01".to_string(),
+        source_id: work.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::REFERENCED_BY.to_string(),
+        target_id: dir_asset.id.clone(),
+        target_type: "asset".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&ref_rel).unwrap();
+
+    // Query via strict API
+    let attachments = core.list_work_directory_attachments(&work.id).unwrap();
+    assert_eq!(attachments.len(), 1, "Only valid Work -> Directory attaches relation must be returned");
+    assert_eq!(attachments[0].0.id, dir_asset.id);
+    assert_eq!(attachments[0].0.kind, AssetKind::Directory);
+    assert_eq!(attachments[0].1.relation_type, relation_types::ATTACHES);
+
+    // Negative case 1: Non-existent work
+    let err_not_found = core.list_work_directory_attachments("non_existent_work_id");
+    assert!(err_not_found.is_err());
+
+    // Negative case 2: Non-work entity
+    let person = Entity::new_person("Creator X", None, None);
+    core.create_entity("suite", &person).unwrap();
+    let err_val = core.list_work_directory_attachments(&person.id);
+    assert!(err_val.is_err(), "Must reject non-work entity");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v05_duplicate_relation_invariant() {
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work_a = core.create_work("suite", "Work A", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+    let work_b = core.create_work("suite", "Work B", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+
+    let rel1 = Relation {
+        id: "rel_dup_1".to_string(),
+        source_id: work_a.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::SEQUEL_OF.to_string(),
+        target_id: work_b.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    let rel2 = Relation {
+        id: "rel_dup_2".to_string(),
+        source_id: work_a.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::SEQUEL_OF.to_string(),
+        target_id: work_b.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+
+    // Both repository and core should treat duplicate logical identity as idempotent success
+    db.create_relation(&rel1).unwrap();
+    db.create_relation(&rel2).unwrap();
+
+    let list = db.list_relations_for_source(&work_a.id).unwrap();
+    assert_eq!(list.len(), 1, "Duplicate relation must not produce a second row in relations table");
+    assert_eq!(list[0].id, "rel_dup_1");
+}
+
+#[test]
+fn test_v05_relation_direction_identity() {
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work_a = core.create_work("suite", "Work Alpha", WorkType::Book, RecordStatus::Planned, None, None).unwrap();
+    let work_b = core.create_work("suite", "Work Beta", WorkType::Book, RecordStatus::Planned, None, None).unwrap();
+
+    // A -> sequel_of -> B
+    let r1 = Relation {
+        id: "rel_dir_1".to_string(),
+        source_id: work_a.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::SEQUEL_OF.to_string(),
+        target_id: work_b.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    // B -> sequel_of -> A (opposite direction)
+    let r2 = Relation {
+        id: "rel_dir_2".to_string(),
+        source_id: work_b.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::SEQUEL_OF.to_string(),
+        target_id: work_a.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    // B -> prequel_of -> A
+    let r3 = Relation {
+        id: "rel_dir_3".to_string(),
+        source_id: work_b.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::PREQUEL_OF.to_string(),
+        target_id: work_a.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+
+    db.create_relation(&r1).unwrap();
+    db.create_relation(&r2).unwrap();
+    db.create_relation(&r3).unwrap();
+
+    let rels_a = db.list_relations_for_source(&work_a.id).unwrap();
+    let rels_b = db.list_relations_for_source(&work_b.id).unwrap();
+
+    assert_eq!(rels_a.len(), 1, "Work A must have 1 outgoing relation");
+    assert_eq!(rels_b.len(), 2, "Work B must have 2 outgoing relations with different types/directions");
+}
+
+#[test]
+fn test_v05_concurrent_primary_switching() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v05_ad_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db);
+
+    let work = core.create_work("suite", "Concurrent Switching Work", WorkType::Anime, RecordStatus::InProgress, None, None).unwrap();
+
+    let r1 = ExternalReference {
+        id: "ref_con_1".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "mal".to_string(),
+        title: "MAL Ref".to_string(),
+        url: "https://mal.net/1".to_string(),
+        description: None,
+        metadata: json!({"is_primary": true}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let r2 = ExternalReference {
+        id: "ref_con_2".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "anilist".to_string(),
+        title: "AniList Ref".to_string(),
+        url: "https://anilist.co/1".to_string(),
+        description: None,
+        metadata: json!({"is_primary": false}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let r3 = ExternalReference {
+        id: "ref_con_3".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "bgm".to_string(),
+        title: "Bangumi Ref".to_string(),
+        url: "https://bgm.tv/1".to_string(),
+        description: None,
+        metadata: json!({"is_primary": false}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    core.create_external_reference("suite", &r1).unwrap();
+    core.create_external_reference("suite", &r2).unwrap();
+    core.create_external_reference("suite", &r3).unwrap();
+
+    let ref_ids = vec![r1.id.clone(), r2.id.clone(), r3.id.clone()];
+
+    // 8 concurrent threads executing rounds
+    let mut handles = Vec::new();
+    for thread_idx in 0..8 {
+        let core_clone = core.clone();
+        let work_id = work.id.clone();
+        let ref_ids_clone = ref_ids.clone();
+
+        handles.push(std::thread::spawn(move || {
+            for round in 0..25 {
+                let target_ref = &ref_ids_clone[(thread_idx + round) % ref_ids_clone.len()];
+                let _ = core_clone.set_primary_external_reference("concurrent-worker", &work_id, target_ref);
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Verify Invariant B: count(primary) <= 1
+    let refs = core.list_external_references(Some(&work.id)).unwrap();
+    let primary_count = refs.iter().filter(|r| r.is_primary()).count();
+    assert_eq!(primary_count, 1, "Concurrent primary switching must result in exactly 1 primary reference");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v05_concurrent_primary_creation() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v05_ae_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db);
+
+    let work = core.create_work("suite", "Concurrent Creation Work", WorkType::Anime, RecordStatus::InProgress, None, None).unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let core_clone = core.clone();
+        let work_id = work.id.clone();
+
+        handles.push(std::thread::spawn(move || {
+            for j in 0..10 {
+                let r = ExternalReference {
+                    id: format!("ref_create_{}_{}", i, j),
+                    entity_id: Some(work_id.clone()),
+                    provider: "provider".to_string(),
+                    title: format!("Ref {}-{}", i, j),
+                    url: format!("https://example.com/{}/{}", i, j),
+                    description: None,
+                    metadata: json!({"is_primary": true}),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                };
+                let _ = core_clone.create_external_reference("concurrent-creator", &r);
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let refs = core.list_external_references(Some(&work.id)).unwrap();
+    let primary_count = refs.iter().filter(|r| r.is_primary()).count();
+    assert_eq!(primary_count, 1, "Concurrent primary creation must result in exactly 1 primary reference");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v05_concurrent_relocate_same_target() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v05_af_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let dir_x = temp_dir.join("dir_x");
+    let dir_y = temp_dir.join("dir_y");
+    std::fs::create_dir_all(&dir_x).unwrap();
+    std::fs::create_dir_all(&dir_y).unwrap();
+
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db);
+
+    let work = core.create_work("suite", "Concurrent Same Target Work", WorkType::Game, RecordStatus::InProgress, None, None).unwrap();
+    let (asset_x, _) = core.link_work_directory("suite", &work.id, &dir_x.to_string_lossy()).unwrap();
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let core_clone = core.clone();
+        let work_id = work.id.clone();
+        let old_asset_id = asset_x.id.clone();
+        let new_dir_str = dir_y.to_string_lossy().to_string();
+
+        handles.push(std::thread::spawn(move || {
+            let _ = core_clone.relocate_work_directory("concurrent-relocate", &work_id, &old_asset_id, &new_dir_str);
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Verify:
+    // 1. Old asset X has 0 attaches relations from work
+    let attachments = core.list_work_directory_attachments(&work.id).unwrap();
+    assert_eq!(attachments.len(), 1, "Work must have exactly 1 attached directory");
+    assert_ne!(attachments[0].0.id, asset_x.id, "Old asset X must be unattached");
+    assert_eq!(attachments[0].0.path.as_deref().map(looma_core::normalize_directory_path), Some(looma_core::normalize_directory_path(&dir_y.to_string_lossy())));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v05_concurrent_relocate_different_targets() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v05_ag_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let dir_x = temp_dir.join("dir_x");
+    let dir_y = temp_dir.join("dir_y");
+    let dir_z = temp_dir.join("dir_z");
+    std::fs::create_dir_all(&dir_x).unwrap();
+    std::fs::create_dir_all(&dir_y).unwrap();
+    std::fs::create_dir_all(&dir_z).unwrap();
+
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db);
+
+    let work = core.create_work("suite", "Concurrent Diff Targets Work", WorkType::Game, RecordStatus::InProgress, None, None).unwrap();
+    let (asset_x, _) = core.link_work_directory("suite", &work.id, &dir_x.to_string_lossy()).unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let core_clone = core.clone();
+        let work_id = work.id.clone();
+        let old_asset_id = asset_x.id.clone();
+        let target_dir = if i % 2 == 0 {
+            dir_y.to_string_lossy().to_string()
+        } else {
+            dir_z.to_string_lossy().to_string()
+        };
+
+        handles.push(std::thread::spawn(move || {
+            let _ = core_clone.relocate_work_directory("concurrent-diff", &work_id, &old_asset_id, &target_dir);
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Invariants check:
+    // 1. Old asset X is not attached
+    let attachments = core.list_work_directory_attachments(&work.id).unwrap();
+    for (asset, _) in &attachments {
+        assert_ne!(asset.id, asset_x.id, "Asset X must be unattached");
+    }
+    // 2. Total attaches == 1 (either Y won or Z won)
+    assert_eq!(attachments.len(), 1, "Must have exactly 1 active directory attachment");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v05_relocate_transaction_failure_preserves_old_state() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v05_ah_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let dir_x = temp_dir.join("dir_initial");
+    std::fs::create_dir_all(&dir_x).unwrap();
+
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db);
+
+    let work = core.create_work("suite", "Failure Preserves Old State Work", WorkType::Anime, RecordStatus::InProgress, None, None).unwrap();
+    let (asset_x, _) = core.link_work_directory("suite", &work.id, &dir_x.to_string_lossy()).unwrap();
+
+    // Attempt relocate to non-existent path
+    let bad_path = temp_dir.join("does_not_exist_dir");
+    let res = core.relocate_work_directory("suite", &work.id, &asset_x.id, &bad_path.to_string_lossy());
+    assert!(res.is_err(), "Relocate to non-existent directory must fail");
+
+    // Old state must be preserved
+    let attachments = core.list_work_directory_attachments(&work.id).unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].0.id, asset_x.id);
+
+    // Audit must have recorded failure
+    let audits = core.list_recent_audits(10).unwrap();
+    assert!(audits.iter().any(|a| a.operation == "work.relocate_directory" && a.result == "failure"), "Audit failure must be recorded");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v05_work_integrity_valid_state() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v05_ai_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let dir = temp_dir.join("valid_dir");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db);
+
+    let work = core.create_work("suite", "Integrity Valid Work", WorkType::Anime, RecordStatus::Completed, None, None).unwrap();
+    core.link_work_directory("suite", &work.id, &dir.to_string_lossy()).unwrap();
+
+    let r1 = ExternalReference {
+        id: "ref_val_1".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "mal".to_string(),
+        title: "Primary".to_string(),
+        url: "https://mal.net/1".to_string(),
+        description: None,
+        metadata: json!({"is_primary": true}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let r2 = ExternalReference {
+        id: "ref_val_2".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "anilist".to_string(),
+        title: "Secondary".to_string(),
+        url: "https://anilist.co/1".to_string(),
+        description: None,
+        metadata: json!({"is_primary": false}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    core.create_external_reference("suite", &r1).unwrap();
+    core.create_external_reference("suite", &r2).unwrap();
+
+    let report = core.validate_work_integrity(&work.id).unwrap();
+    assert!(report.valid, "Valid work entity must pass integrity check");
+    assert!(report.violations.is_empty(), "Violations list must be empty");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v05_work_integrity_detects_duplicate_primary() {
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Corrupted Primary Work", WorkType::Anime, RecordStatus::InProgress, None, None).unwrap();
+    let r1 = ExternalReference {
+        id: "ref_dup_p1".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "p1".to_string(),
+        title: "Ref 1".to_string(),
+        url: "https://p1.org".to_string(),
+        description: None,
+        metadata: json!({"is_primary": true}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let r2 = ExternalReference {
+        id: "ref_dup_p2".to_string(),
+        entity_id: Some(work.id.clone()),
+        provider: "p2".to_string(),
+        title: "Ref 2".to_string(),
+        url: "https://p2.org".to_string(),
+        description: None,
+        metadata: json!({"is_primary": false}),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    core.create_external_reference("suite", &r1).unwrap();
+    core.create_external_reference("suite", &r2).unwrap();
+
+    // Directly corrupt DB by setting r2 is_primary = true
+    let mut updated_r2 = r2.clone();
+    if let Some(obj) = updated_r2.metadata.as_object_mut() {
+        obj.insert("is_primary".to_string(), json!(true));
+    }
+    db.update_external_reference(&updated_r2).unwrap();
+
+    let report = core.validate_work_integrity(&work.id).unwrap();
+    assert!(!report.valid, "Integrity check must fail when duplicate primary exists");
+    assert!(report.violations.iter().any(|v| v.kind == "duplicate_primary"));
+}
+
+#[test]
+fn test_v05_work_integrity_detects_invalid_attachment() {
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Corrupted Attachment Work", WorkType::Anime, RecordStatus::InProgress, None, None).unwrap();
+
+    // 1. Attach a Document asset
+    let doc_asset = Asset {
+        id: "doc_bad_asset".to_string(),
+        kind: AssetKind::Document,
+        source: AssetSource::Local,
+        path: Some("file.pdf".to_string()),
+        size: Some(1024),
+        hash: None,
+        mime_type: Some("application/pdf".to_string()),
+        metadata: json!({}),
+        status: AssetStatus::Active,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        indexed_at: Utc::now(),
+    };
+    db.upsert_asset(&doc_asset).unwrap();
+    let rel = Relation {
+        id: "rel_bad_kind".to_string(),
+        source_id: work.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::ATTACHES.to_string(),
+        target_id: doc_asset.id.clone(),
+        target_type: "asset".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&rel).unwrap();
+
+    let report = core.validate_work_integrity(&work.id).unwrap();
+    assert!(!report.valid);
+    assert!(report.violations.iter().any(|v| v.kind == "invalid_attachment_asset_kind"));
+
+    // 2. Reverse attachment
+    let rev_rel = Relation {
+        id: "rel_bad_dir".to_string(),
+        source_id: doc_asset.id.clone(),
+        source_type: "asset".to_string(),
+        relation_type: relation_types::ATTACHES.to_string(),
+        target_id: work.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&rev_rel).unwrap();
+
+    let report2 = core.validate_work_integrity(&work.id).unwrap();
+    assert!(!report2.valid);
+    assert!(report2.violations.iter().any(|v| v.kind == "invalid_attachment_direction"));
+}
+
+#[test]
+fn test_v05_work_integrity_detects_self_relation() {
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Self Relation Work", WorkType::Manga, RecordStatus::InProgress, None, None).unwrap();
+
+    // Directly insert self relation via DB
+    let self_rel = Relation {
+        id: "rel_self_01".to_string(),
+        source_id: work.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::RELATED_TO.to_string(),
+        target_id: work.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&self_rel).unwrap();
+
+    let report = core.validate_work_integrity(&work.id).unwrap();
+    assert!(!report.valid, "Integrity check must detect self relation");
+    assert!(report.violations.iter().any(|v| v.kind == "self_relation"));
+}
+
+#[test]
+fn test_v05_cli_integrity_exit_code() {
+    let db = Arc::new(LoomaDb::in_memory().unwrap());
+    let core = LoomaCore::new(db);
+
+    // Valid work
+    let valid_work = core.create_work("suite", "Valid Work", WorkType::Book, RecordStatus::Planned, None, None).unwrap();
+    let rep_valid = core.validate_work_integrity(&valid_work.id).unwrap();
+    assert!(rep_valid.valid);
+
+    // Missing work
+    let rep_missing = core.validate_work_integrity("missing_entity_id").unwrap();
+    assert!(!rep_missing.valid);
+    assert_eq!(rep_missing.violations[0].kind, "work_not_found");
+}
+
+#[test]
+fn test_v05_cross_layer_aggregate_consistency() {
+    let vault_path = std::env::temp_dir().join(format!("looma_v05_an_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&vault_path).unwrap();
+
+    let work_id;
+    {
+        let db = Arc::new(LoomaDb::open(&vault_path).unwrap());
+        let core = LoomaCore::new(db);
+
+        // 1. Identity
+        let work = core.create_work("suite", "Cross Layer Work", WorkType::Anime, RecordStatus::InProgress, Some("Native X".to_string()), Some("Desc X".to_string())).unwrap();
+        work_id = work.id.clone();
+        core.update_work_aliases("suite", &work_id, vec!["Alias 1".to_string(), "Alias 2".to_string()]).unwrap();
+
+        // 2. Lifecycle & Progress
+        core.update_work_status("suite", &work_id, RecordStatus::InProgress).unwrap();
+        core.update_work_progress("suite", &work_id, 12.0, Some(ProgressPositionType::Episode), Some(24.0), Some("集".to_string())).unwrap();
+
+        // 3. Metadata overlay
+        core.update_work_type_metadata("suite", &work_id, Some(TypeSpecificMetadata::Anime(AnimeSpecificMeta {
+            season: Some("2026-10".to_string()),
+            total_episodes: Some(24),
+            anime_format: Some("tv".to_string()),
+            studio: Some("Studio Trigger".to_string()),
+            broadcast_day: Some("Friday".to_string()),
+        }))).unwrap();
+
+        // 4. Directory Asset Attachment
+        let dir = vault_path.join("anime_episodes");
+        std::fs::create_dir_all(&dir).unwrap();
+        core.link_work_directory("suite", &work_id, &dir.to_string_lossy()).unwrap();
+
+        // 5. External Reference Primary
+        let ext_ref = ExternalReference {
+            id: "ref_an_1".to_string(),
+            entity_id: Some(work_id.clone()),
+            provider: "mal".to_string(),
+            title: "MAL".to_string(),
+            url: "https://mal.net/x".to_string(),
+            description: None,
+            metadata: json!({"is_primary": true}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        core.create_external_reference("suite", &ext_ref).unwrap();
+
+        // 6. Memory Note
+        let mem = Memory {
+            id: "mem_cross_1".to_string(),
+            title: "Anime thoughts".to_string(),
+            content: "Great animation".to_string(),
+            category: Some("anime".to_string()),
+            metadata: json!({}),
+            recorded_at: Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        core.create_memory("suite", &mem).unwrap();
+        core.link_work_memory("suite", &work_id, &mem.id).unwrap();
+
+        // 7. Universe Relation
+        let work_b = core.create_work("suite", "Sequel Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+        let rel = Relation {
+            id: "rel_seq_1".to_string(),
+            source_id: work_id.clone(),
+            source_type: "entity".to_string(),
+            relation_type: relation_types::SEQUEL_OF.to_string(),
+            target_id: work_b.id.clone(),
+            target_type: "entity".to_string(),
+            metadata: json!({}),
+            created_at: Utc::now(),
+        };
+        core.create_relation("suite", &rel).unwrap();
+    }
+
+    // Simulate Cold Restart: Open fresh DB connection on same vault
+    {
+        let db2 = Arc::new(LoomaDb::open(&vault_path).unwrap());
+        let core2 = LoomaCore::new(db2);
+
+        let summary = core2.get_work_summary(&work_id).unwrap().expect("Work summary must exist after cold restart");
+
+        // Identity layer
+        assert_eq!(summary.entity.title, "Cross Layer Work");
+        let meta = summary.work_metadata.as_ref().unwrap();
+        assert_eq!(meta.original_title.as_deref(), Some("Native X"));
+        assert_eq!(meta.aliases, vec!["Alias 1".to_string(), "Alias 2".to_string()]);
+
+        // Lifecycle & Progress layer
+        assert_eq!(meta.status, RecordStatus::InProgress);
+        let prog = meta.progress.as_ref().unwrap();
+        assert_eq!(prog.position, 12.0);
+        assert_eq!(prog.total_positions, Some(24.0));
+        assert_eq!(prog.unit.as_deref(), Some("集"));
+
+        // Type metadata layer
+        match &meta.type_metadata {
+            Some(TypeSpecificMetadata::Anime(a)) => {
+                assert_eq!(a.studio.as_deref(), Some("Studio Trigger"));
+                assert_eq!(a.broadcast_day.as_deref(), Some("Friday"));
+            }
+            other => panic!("Expected Anime type metadata, got {:?}", other),
+        }
+
+        // Connections: Assets
+        assert_eq!(summary.linked_assets.len(), 1);
+        assert_eq!(summary.linked_assets[0].kind, AssetKind::Directory);
+
+        // Connections: External References
+        assert_eq!(summary.external_references.len(), 1);
+        assert!(summary.external_references[0].is_primary());
+
+        // Connections: Memories
+        assert_eq!(summary.linked_memories.len(), 1);
+
+        // Connections: Relations
+        assert!(summary.relations.iter().any(|r| r.relation_type == relation_types::SEQUEL_OF));
+
+        // Update single layer (Lifecycle) and verify all other layers remain unchanged
+        core2.update_work_status("suite", &work_id, RecordStatus::Completed).unwrap();
+
+        let summary2 = core2.get_work_summary(&work_id).unwrap().unwrap();
+        let meta2 = summary2.work_metadata.unwrap();
+        assert_eq!(meta2.status, RecordStatus::Completed);
+        assert_eq!(meta2.aliases, vec!["Alias 1".to_string(), "Alias 2".to_string()]);
+        assert_eq!(meta2.progress.unwrap().position, 12.0);
+        assert_eq!(summary2.linked_assets.len(), 1);
+        assert_eq!(summary2.external_references.len(), 1);
+        assert_eq!(summary2.linked_memories.len(), 1);
+    }
+
+    let _ = std::fs::remove_dir_all(&vault_path);
+}
+
+#[test]
+fn test_v05_unknown_enum_forward_compatibility() {
+    // 1. Unknown WorkType
+    let json_future_work = json!("future_quantum_media_2099");
+    let parsed_type: WorkType = serde_json::from_value(json_future_work).unwrap();
+    assert_eq!(parsed_type, WorkType::Other, "Unknown work_type must fall back to WorkType::Other");
+
+    // 2. Unknown RecordStatus
+    let json_future_status = json!("ascended_to_nirvana");
+    let parsed_status: RecordStatus = serde_json::from_value(json_future_status).unwrap();
+    assert_eq!(parsed_status, RecordStatus::Unknown, "Unknown status must fall back to RecordStatus::Unknown");
+
+    // 3. Full WorkMetadata containing future fields and unrecognized enums
+    let json_future_metadata = json!({
+        "work_type": "metaverse_experience",
+        "status": "hyper_completed",
+        "original_title": "Future Neo Matrix",
+        "aliases": ["Matrix 5"],
+        "future_unrecognized_dimension": 42
+    });
+
+    let meta: WorkMetadata = serde_json::from_value(json_future_metadata).unwrap();
+    assert_eq!(meta.work_type, WorkType::Other);
+    assert_eq!(meta.status, RecordStatus::Unknown);
+    assert_eq!(meta.original_title.as_deref(), Some("Future Neo Matrix"));
+    assert_eq!(meta.aliases, vec!["Matrix 5".to_string()]);
+}
+
+
 
 

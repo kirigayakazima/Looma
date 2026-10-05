@@ -270,6 +270,11 @@ enum WorkCommands {
         #[arg(help = "New directory path")]
         new_path: PathBuf,
     },
+    #[command(about = "Validate integrity and invariants of a work entity")]
+    Check {
+        #[arg(help = "Work Entity ID")]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -639,6 +644,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  New Asset ID: {}", asset.id);
                 println!("  New Path:     {}", asset.path.unwrap_or_default());
                 println!("  New Relation: {} [{}]", rel.id, rel.relation_type);
+            }
+            WorkCommands::Check { id } => {
+                let report = core.validate_work_integrity(&id)?;
+                if report.valid {
+                    println!("Work Integrity: PASS");
+                    println!("No violations found.");
+                } else {
+                    println!("Work Integrity: FAIL\n");
+                    for v in &report.violations {
+                        println!("- {}", v.message);
+                    }
+                    std::process::exit(1);
+                }
             }
         },
 

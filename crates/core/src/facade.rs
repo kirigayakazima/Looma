@@ -420,42 +420,62 @@ impl LoomaCore {
         entity_id: &str,
         reference_id: &str,
     ) -> LoomaResult<Vec<ExternalReference>> {
-        // Pre-validation 1: Entity exists
-        if self.get_entity(entity_id)?.is_none() {
-            return Err(LoomaError::NotFound(format!("Entity not found: {entity_id}")));
+        let res: LoomaResult<Vec<ExternalReference>> = (|| {
+            // Pre-validation 1: Entity exists
+            if self.get_entity(entity_id)?.is_none() {
+                return Err(LoomaError::NotFound(format!("Entity not found: {entity_id}")));
+            }
+
+            // Pre-validation 2: Reference exists and belongs to entity
+            let r = self.get_external_reference(reference_id)?
+                .ok_or_else(|| LoomaError::NotFound(format!("External reference not found: {reference_id}")))?;
+            if r.entity_id.as_deref() != Some(entity_id) {
+                return Err(LoomaError::Validation(format!(
+                    "External reference {reference_id} does not belong to entity {entity_id}"
+                )));
+            }
+
+            // Execute atomic transaction in repository
+            self.repo.set_primary_external_reference(entity_id, reference_id)?;
+
+            self.list_external_references(Some(entity_id))
+        })();
+
+        match res {
+            Ok(updated) => {
+                self.record_audit(
+                    actor,
+                    "work.set_primary_external_reference",
+                    "entity",
+                    entity_id,
+                    "success",
+                    json!({ "primary_reference_id": reference_id }),
+                )?;
+
+                self.emit_event(
+                    actor,
+                    DomainEvent::EntityUpdated {
+                        id: entity_id.to_string(),
+                    },
+                );
+
+                Ok(updated)
+            }
+            Err(e) => {
+                let _ = self.record_audit(
+                    actor,
+                    "work.set_primary_external_reference",
+                    "entity",
+                    entity_id,
+                    "failure",
+                    json!({
+                        "target_reference_id": reference_id,
+                        "error": e.to_string(),
+                    }),
+                );
+                Err(e)
+            }
         }
-
-        // Pre-validation 2: Reference exists and belongs to entity
-        let r = self.get_external_reference(reference_id)?
-            .ok_or_else(|| LoomaError::NotFound(format!("External reference not found: {reference_id}")))?;
-        if r.entity_id.as_deref() != Some(entity_id) {
-            return Err(LoomaError::Validation(format!(
-                "External reference {reference_id} does not belong to entity {entity_id}"
-            )));
-        }
-
-        // Execute atomic transaction in repository
-        self.repo.set_primary_external_reference(entity_id, reference_id)?;
-
-        let updated = self.list_external_references(Some(entity_id))?;
-
-        self.record_audit(
-            actor,
-            "work.set_primary_external_reference",
-            "entity",
-            entity_id,
-            "success",
-            json!({ "primary_reference_id": reference_id }),
-        )?;
-
-        self.emit_event(
-            actor,
-            DomainEvent::EntityUpdated {
-                id: entity_id.to_string(),
-            },
-        );
-
-        Ok(updated)
     }
 
     pub fn update_work_cover_asset(
@@ -763,6 +783,160 @@ impl LoomaCore {
         Ok(new_asset)
     }
 
+    /// Lists all directory assets attached to a Work entity via strict Work -> Directory Asset 'attaches' relations.
+    pub fn list_work_directory_attachments(
+        &self,
+        work_id: &str,
+    ) -> LoomaResult<Vec<(Asset, Relation)>> {
+        let entity = self.get_entity(work_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity '{work_id}' not found")))?;
+
+        if entity.as_work_metadata().is_none() && entity.entity_type != "work" {
+            return Err(LoomaError::Validation(format!(
+                "Entity '{work_id}' is of type '{}', expected a work entity",
+                entity.entity_type
+            )));
+        }
+
+        let relations = self.list_relations_for_source(work_id)?;
+        let mut results = Vec::new();
+
+        for rel in relations {
+            if rel.relation_type == relation_types::ATTACHES && rel.target_type == "asset" {
+                if let Some(asset) = self.get_asset(&rel.target_id)? {
+                    if asset.kind == AssetKind::Directory {
+                        results.push((asset, rel));
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Read-only validation of all invariants and integrity rules for a given Work entity.
+    pub fn validate_work_integrity(&self, work_id: &str) -> LoomaResult<IntegrityReport> {
+        let mut violations = Vec::new();
+
+        // 1. Work Entity existence and type check
+        let entity = match self.get_entity(work_id)? {
+            Some(e) => e,
+            None => {
+                return Ok(IntegrityReport::with_violations(vec![IntegrityViolation::new(
+                    "work_not_found",
+                    format!("Work entity '{work_id}' not found"),
+                )]));
+            }
+        };
+
+        if entity.as_work_metadata().is_none() && entity.entity_type != "work" {
+            return Ok(IntegrityReport::with_violations(vec![IntegrityViolation::new(
+                "not_a_work",
+                format!("Entity '{work_id}' has entity_type '{}', expected a work entity", entity.entity_type),
+            )]));
+        }
+
+        // 2. External References Primary Invariant (at most 1 primary)
+        let ext_refs = self.list_external_references(Some(work_id))?;
+        let primary_count = ext_refs.iter().filter(|r| r.is_primary()).count();
+        if primary_count > 1 {
+            violations.push(IntegrityViolation::new(
+                "duplicate_primary",
+                format!(
+                    "Work '{work_id}' has {primary_count} primary external references, maximum allowed is 1"
+                ),
+            ));
+        }
+
+        // 3. Relations and Attachment Invariants
+        let relations = self.list_relations_for_item(work_id)?;
+        let mut seen_identities = std::collections::HashSet::new();
+        let mut seen_attached_assets = std::collections::HashSet::new();
+
+        for r in &relations {
+            // 3a. Self-relation check
+            if r.source_id == r.target_id {
+                violations.push(IntegrityViolation::new(
+                    "self_relation",
+                    format!(
+                        "Relation '{}' has identical source and target endpoint: '{}'",
+                        r.id, r.source_id
+                    ),
+                ));
+            }
+
+            // 3b. Missing endpoints check
+            if !self.check_item_exists(&r.source_id, &r.source_type)? {
+                violations.push(IntegrityViolation::new(
+                    "missing_relation_endpoint",
+                    format!(
+                        "Relation '{}' source {} '{}' does not exist",
+                        r.id, r.source_type, r.source_id
+                    ),
+                ));
+            }
+            if !self.check_item_exists(&r.target_id, &r.target_type)? {
+                violations.push(IntegrityViolation::new(
+                    "missing_relation_endpoint",
+                    format!(
+                        "Relation '{}' target {} '{}' does not exist",
+                        r.id, r.target_type, r.target_id
+                    ),
+                ));
+            }
+
+            // 3c. Duplicate relation check (Logical Identity: source_id, relation_type, target_id)
+            let identity = (r.source_id.clone(), r.relation_type.clone(), r.target_id.clone());
+            if !seen_identities.insert(identity.clone()) {
+                violations.push(IntegrityViolation::new(
+                    "duplicate_relation",
+                    format!(
+                        "Duplicate relation detected: source='{}', type='{}', target='{}'",
+                        identity.0, identity.1, identity.2
+                    ),
+                ));
+            }
+
+            // 3d. Attachment checks
+            if r.relation_type == relation_types::ATTACHES {
+                if r.target_id == work_id {
+                    // Reverse attachment detected!
+                    violations.push(IntegrityViolation::new(
+                        "invalid_attachment_direction",
+                        format!(
+                            "Reverse attachment detected: asset '{}' -> work '{}'",
+                            r.source_id, r.target_id
+                        ),
+                    ));
+                } else if r.source_id == work_id {
+                    // Target must be directory asset
+                    if let Ok(Some(asset)) = self.get_asset(&r.target_id) {
+                        if asset.kind != AssetKind::Directory {
+                            violations.push(IntegrityViolation::new(
+                                "invalid_attachment_asset_kind",
+                                format!(
+                                    "Attachment target asset '{}' is of kind '{:?}', expected Directory",
+                                    asset.id, asset.kind
+                                ),
+                            ));
+                        }
+                    }
+                    if !seen_attached_assets.insert(r.target_id.clone()) {
+                        violations.push(IntegrityViolation::new(
+                            "duplicate_attachment",
+                            format!(
+                                "Work '{work_id}' has duplicate attachment to directory asset '{}'",
+                                r.target_id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(IntegrityReport::with_violations(violations))
+    }
+
     pub fn link_work_directory(
         &self,
         actor: &str,
@@ -782,142 +956,165 @@ impl LoomaCore {
         old_asset_id: &str,
         new_dir_path: &str,
     ) -> LoomaResult<(Asset, Relation)> {
-        // Pre-validation 1: Work entity must exist
-        if self.get_entity(work_id)?.is_none() {
-            return Err(LoomaError::NotFound(format!("Work entity not found: {work_id}")));
-        }
-
-        // Pre-validation 2: Old asset must exist and be a directory
-        let old_asset = self.get_asset(old_asset_id)?
-            .ok_or_else(|| LoomaError::NotFound(format!("Old asset not found: {old_asset_id}")))?;
-        if old_asset.kind != AssetKind::Directory {
-            return Err(LoomaError::Validation(format!(
-                "Asset {old_asset_id} is not a directory asset"
-            )));
-        }
-
-        // Pre-validation 3: Old asset must be linked to work strictly via ATTACHES relation
-        // Direction must be source = work_id, target = old_asset_id
-        let existing_source_relations = self.list_relations_for_source(work_id)?;
-        let old_rel = existing_source_relations.iter().find(|r| {
-            r.target_id == old_asset_id && r.relation_type == relation_types::ATTACHES
-        }).ok_or_else(|| LoomaError::Validation(format!(
-            "Old asset {old_asset_id} is not linked to work {work_id} via attaches relation"
-        )))?;
-
-        // Pre-validation 4: Validate new path exists on disk and is a directory
-        let norm_path = normalize_directory_path(new_dir_path);
-        if norm_path.is_empty() {
-            return Err(LoomaError::Validation("Directory path cannot be empty".to_string()));
-        }
-        let p = Path::new(&norm_path);
-        if !p.exists() {
-            return Err(LoomaError::Validation(format!(
-                "Directory path does not exist: {norm_path}"
-            )));
-        }
-        if !p.is_dir() {
-            return Err(LoomaError::Validation(format!(
-                "Path is not a directory: {norm_path}"
-            )));
-        }
-
-        // Case E: New path and old path are identical -> Idempotent success!
-        if let Some(ref old_path) = old_asset.path {
-            if normalize_directory_path(old_path) == norm_path {
-                return Ok((old_asset, old_rel.clone()));
+        let res: LoomaResult<(Asset, Relation)> = (|| {
+            // Pre-validation 1: Work entity must exist
+            if self.get_entity(work_id)?.is_none() {
+                return Err(LoomaError::NotFound(format!("Work entity not found: {work_id}")));
             }
-        }
 
-        // Prepare new asset (reuse if path already in DB, or create new)
-        let new_asset = if let Some(existing) = self.get_asset_by_path(&norm_path)? {
-            if existing.kind != AssetKind::Directory {
+            // Pre-validation 2: Old asset must exist and be a directory
+            let old_asset = self.get_asset(old_asset_id)?
+                .ok_or_else(|| LoomaError::NotFound(format!("Old asset not found: {old_asset_id}")))?;
+            if old_asset.kind != AssetKind::Directory {
                 return Err(LoomaError::Validation(format!(
-                    "Target asset {} is not a directory asset", existing.id
+                    "Asset {old_asset_id} is not a directory asset"
                 )));
             }
-            existing
-        } else {
-            let dir_name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| norm_path.clone());
 
-            let drive = if norm_path.len() >= 2 && &norm_path[1..2] == ":" {
-                norm_path[0..2].to_uppercase()
+            // Pre-validation 3: Old asset must be linked to work strictly via ATTACHES relation
+            // Direction must be source = work_id, target = old_asset_id
+            let existing_source_relations = self.list_relations_for_source(work_id)?;
+            let old_rel = existing_source_relations.iter().find(|r| {
+                r.target_id == old_asset_id && r.relation_type == relation_types::ATTACHES
+            }).ok_or_else(|| LoomaError::Validation(format!(
+                "Old asset {old_asset_id} is not linked to work {work_id} via attaches relation"
+            )))?;
+
+            // Pre-validation 4: Validate new path exists on disk and is a directory
+            let norm_path = normalize_directory_path(new_dir_path);
+            if norm_path.is_empty() {
+                return Err(LoomaError::Validation("Directory path cannot be empty".to_string()));
+            }
+            let p = Path::new(&norm_path);
+            if !p.exists() {
+                return Err(LoomaError::Validation(format!(
+                    "Directory path does not exist: {norm_path}"
+                )));
+            }
+            if !p.is_dir() {
+                return Err(LoomaError::Validation(format!(
+                    "Path is not a directory: {norm_path}"
+                )));
+            }
+
+            // Case E: New path and old path are identical -> Idempotent success!
+            if let Some(ref old_path) = old_asset.path {
+                if normalize_directory_path(old_path) == norm_path {
+                    return Ok((old_asset, old_rel.clone()));
+                }
+            }
+
+            // Prepare new asset (reuse if path already in DB, or create new)
+            let new_asset = if let Some(existing) = self.get_asset_by_path(&norm_path)? {
+                if existing.kind != AssetKind::Directory {
+                    return Err(LoomaError::Validation(format!(
+                        "Target asset {} is not a directory asset", existing.id
+                    )));
+                }
+                existing
             } else {
-                "Local".to_string()
+                let dir_name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| norm_path.clone());
+
+                let drive = if norm_path.len() >= 2 && &norm_path[1..2] == ":" {
+                    norm_path[0..2].to_uppercase()
+                } else {
+                    "Local".to_string()
+                };
+
+                let now = Utc::now();
+                Asset {
+                    id: Uuid::new_v4().to_string(),
+                    kind: AssetKind::Directory,
+                    source: AssetSource::Local,
+                    path: Some(norm_path.clone()),
+                    size: None,
+                    hash: None,
+                    mime_type: Some("inode/directory".to_string()),
+                    metadata: json!({
+                        "directory_name": dir_name,
+                        "drive": drive,
+                    }),
+                    status: AssetStatus::Active,
+                    created_at: now,
+                    modified_at: now,
+                    indexed_at: now,
+                }
             };
 
-            let now = Utc::now();
-            Asset {
-                id: Uuid::new_v4().to_string(),
-                kind: AssetKind::Directory,
-                source: AssetSource::Local,
-                path: Some(norm_path.clone()),
-                size: None,
-                hash: None,
-                mime_type: Some("inode/directory".to_string()),
-                metadata: json!({
-                    "directory_name": dir_name,
-                    "drive": drive,
-                }),
-                status: AssetStatus::Active,
-                created_at: now,
-                modified_at: now,
-                indexed_at: now,
-            }
-        };
-
-        // Prepare new relation
-        let new_rel = Relation {
-            id: format!("rel_{}", &Uuid::new_v4().to_string()[..8]),
-            source_id: work_id.to_string(),
-            source_type: "entity".to_string(),
-            relation_type: relation_types::ATTACHES.to_string(),
-            target_id: new_asset.id.clone(),
-            target_type: "asset".to_string(),
-            metadata: json!({ "domain": "personal_records" }),
-            created_at: Utc::now(),
-        };
-
-        // Check if target is already attached to work
-        let existing_target_rel = existing_source_relations.iter().find(|r| {
-            r.target_id == new_asset.id && r.relation_type == relation_types::ATTACHES
-        });
-
-        // Atomically relocate in DB (single transaction: upsert new asset, delete old relation, insert new relation if needed)
-        self.repo.relocate_work_directory(work_id, old_asset_id, &new_asset, &new_rel)?;
-
-        let final_rel = if let Some(existing_r) = existing_target_rel {
-            existing_r.clone()
-        } else {
-            new_rel.clone()
-        };
-
-        self.record_audit(
-            actor,
-            "work.relocate_directory",
-            "entity",
-            work_id,
-            "success",
-            json!({
-                "old_asset_id": old_asset_id,
-                "new_asset_id": new_asset.id,
-                "new_path": new_asset.path,
-            }),
-        )?;
-
-        self.emit_event(
-            actor,
-            DomainEvent::RelationCreated {
-                id: final_rel.id.clone(),
+            // Prepare new relation
+            let new_rel = Relation {
+                id: format!("rel_{}", &Uuid::new_v4().to_string()[..8]),
                 source_id: work_id.to_string(),
+                source_type: "entity".to_string(),
+                relation_type: relation_types::ATTACHES.to_string(),
                 target_id: new_asset.id.clone(),
-            },
-        );
+                target_type: "asset".to_string(),
+                metadata: json!({ "domain": "personal_records" }),
+                created_at: Utc::now(),
+            };
 
-        Ok((new_asset, final_rel))
+            // Check if target is already attached to work
+            let existing_target_rel = existing_source_relations.iter().find(|r| {
+                r.target_id == new_asset.id && r.relation_type == relation_types::ATTACHES
+            });
+
+            // Atomically relocate in DB (single transaction: upsert new asset, delete old relation, insert new relation if needed)
+            self.repo.relocate_work_directory(work_id, old_asset_id, &new_asset, &new_rel)?;
+
+            let final_rel = if let Some(existing_r) = existing_target_rel {
+                existing_r.clone()
+            } else {
+                new_rel.clone()
+            };
+
+            Ok((new_asset, final_rel))
+        })();
+
+        match res {
+            Ok((new_asset, final_rel)) => {
+                self.record_audit(
+                    actor,
+                    "work.relocate_directory",
+                    "entity",
+                    work_id,
+                    "success",
+                    json!({
+                        "old_asset_id": old_asset_id,
+                        "new_asset_id": new_asset.id,
+                        "new_path": new_asset.path,
+                    }),
+                )?;
+
+                self.emit_event(
+                    actor,
+                    DomainEvent::RelationCreated {
+                        id: final_rel.id.clone(),
+                        source_id: work_id.to_string(),
+                        target_id: new_asset.id.clone(),
+                    },
+                );
+
+                Ok((new_asset, final_rel))
+            }
+            Err(e) => {
+                let _ = self.record_audit(
+                    actor,
+                    "work.relocate_directory",
+                    "entity",
+                    work_id,
+                    "failure",
+                    json!({
+                        "old_asset_id": old_asset_id,
+                        "new_path": new_dir_path,
+                        "error": e.to_string(),
+                    }),
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Update type-specific metadata overlay on a Work entity
@@ -1000,58 +1197,82 @@ impl LoomaCore {
     }
 
     pub fn create_relation(&self, actor: &str, relation: &Relation) -> LoomaResult<()> {
-        // P1 Integrity Check 1: Self relation is rejected
-        if relation.source_id == relation.target_id {
-            return Err(LoomaError::Validation(format!(
-                "Self-relation is not allowed: source_id and target_id are both '{}'",
-                relation.source_id
-            )));
-        }
+        let res: LoomaResult<()> = (|| {
+            // P1 Integrity Check 1: Self relation is rejected
+            if relation.source_id == relation.target_id {
+                return Err(LoomaError::Validation(format!(
+                    "Self-relation is not allowed: source_id and target_id are both '{}'",
+                    relation.source_id
+                )));
+            }
 
-        // P1 Integrity Check 2: Relation source must exist
-        if !self.check_item_exists(&relation.source_id, &relation.source_type)? {
-            return Err(LoomaError::NotFound(format!(
-                "Relation source {} '{}' not found",
-                relation.source_type, relation.source_id
-            )));
-        }
+            // P1 Integrity Check 2: Relation source must exist
+            if !self.check_item_exists(&relation.source_id, &relation.source_type)? {
+                return Err(LoomaError::NotFound(format!(
+                    "Relation source {} '{}' not found",
+                    relation.source_type, relation.source_id
+                )));
+            }
 
-        // P1 Integrity Check 3: Relation target must exist
-        if !self.check_item_exists(&relation.target_id, &relation.target_type)? {
-            return Err(LoomaError::NotFound(format!(
-                "Relation target {} '{}' not found",
-                relation.target_type, relation.target_id
-            )));
-        }
+            // P1 Integrity Check 3: Relation target must exist
+            if !self.check_item_exists(&relation.target_id, &relation.target_type)? {
+                return Err(LoomaError::NotFound(format!(
+                    "Relation target {} '{}' not found",
+                    relation.target_type, relation.target_id
+                )));
+            }
 
-        // P1 Integrity Check 4: Duplicate relation protection (idempotent success)
-        let existing = self.repo.list_relations_for_source(&relation.source_id)?;
-        if existing.iter().any(|r| r.relation_type == relation.relation_type && r.target_id == relation.target_id) {
-            return Ok(());
-        }
+            // P1 Integrity Check 4: Duplicate relation protection (idempotent success)
+            let existing = self.repo.list_relations_for_source(&relation.source_id)?;
+            if existing.iter().any(|r| r.relation_type == relation.relation_type && r.target_id == relation.target_id) {
+                return Ok(());
+            }
 
-        self.repo.create_relation(relation)?;
-        self.record_audit(
-            actor,
-            "relation.create",
-            "relation",
-            &relation.id,
-            "success",
-            json!({
-                "source_id": relation.source_id,
-                "target_id": relation.target_id,
-                "relation_type": relation.relation_type,
-            }),
-        )?;
-        self.emit_event(
-            actor,
-            DomainEvent::RelationCreated {
-                id: relation.id.clone(),
-                source_id: relation.source_id.clone(),
-                target_id: relation.target_id.clone(),
-            },
-        );
-        Ok(())
+            self.repo.create_relation(relation)?;
+            Ok(())
+        })();
+
+        match res {
+            Ok(()) => {
+                self.record_audit(
+                    actor,
+                    "relation.create",
+                    "relation",
+                    &relation.id,
+                    "success",
+                    json!({
+                        "source_id": relation.source_id,
+                        "target_id": relation.target_id,
+                        "relation_type": relation.relation_type,
+                    }),
+                )?;
+                self.emit_event(
+                    actor,
+                    DomainEvent::RelationCreated {
+                        id: relation.id.clone(),
+                        source_id: relation.source_id.clone(),
+                        target_id: relation.target_id.clone(),
+                    },
+                );
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.record_audit(
+                    actor,
+                    "relation.create",
+                    "relation",
+                    &relation.id,
+                    "failure",
+                    json!({
+                        "source_id": relation.source_id,
+                        "target_id": relation.target_id,
+                        "relation_type": relation.relation_type,
+                        "error": e.to_string(),
+                    }),
+                );
+                Err(e)
+            }
+        }
     }
 
     pub fn delete_relation(&self, actor: &str, id: &str) -> LoomaResult<bool> {
