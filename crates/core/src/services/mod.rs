@@ -3,9 +3,9 @@ pub mod cloud;
 use crate::error::LoomaResult;
 pub use cloud::{CloudStorage, LocalDirStorage, RemoteObjectMeta};
 use crate::models::{
-    Asset, AssetFilter, BackupResult, Collection, CollectionItem, Entity, EntityFilter, Memory,
-    Relation, RestoreResult, TimelineFilter, TimelineItem, VaultDoctorReport, VaultInfo,
-    VaultManifest, VaultStats,
+    Asset, AssetFilter, BackupResult, Collection, CollectionItem, Entity, EntityFilter,
+    IntegrityRepairPlan, Memory, Relation, RestoreResult, TimelineFilter, TimelineItem,
+    VaultDoctorReport, VaultInfo, VaultManifest, VaultStats,
 };
 
 pub trait VaultService: Send + Sync {
@@ -31,6 +31,7 @@ pub trait EntityService: Send + Sync {
     fn update_entity(&self, entity: &Entity) -> LoomaResult<()>;
     fn delete_entity(&self, id: &str) -> LoomaResult<bool>;
     fn count_entities(&self) -> LoomaResult<u64>;
+    fn repair_work_integrity(&self, work_id: &str, plan: &IntegrityRepairPlan) -> LoomaResult<()>;
 }
 
 pub trait RelationService: Send + Sync {

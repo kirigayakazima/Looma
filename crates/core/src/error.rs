@@ -22,6 +22,12 @@ pub enum LoomaError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Conflict error: {0}")]
+    Conflict(String),
+
+    #[error("Integrity error: {0}")]
+    Integrity(String),
 }
 
 pub type LoomaResult<T> = Result<T, LoomaError>;

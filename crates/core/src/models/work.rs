@@ -751,7 +751,7 @@ impl RepairActionKind {
     }
 }
 
-/// Individual action in an integrity repair plan
+/// Individual action in an integrity repair plan (preview representation)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntegrityRepairAction {
     pub kind: RepairActionKind,
@@ -760,12 +760,81 @@ pub struct IntegrityRepairAction {
     pub details: serde_json::Value,
 }
 
-/// Deterministic, read-only preview of repair actions for an integrity violation
+/// Machine-executable repair operation targeting a single, explicitly identified entity or relation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityRepairOperation {
+    RemoveDuplicateRelation {
+        relation_id: String,
+    },
+    RemoveDuplicatePrimary {
+        reference_id: String,
+    },
+    RemoveInvalidAttachment {
+        relation_id: String,
+    },
+    RemoveSelfRelation {
+        relation_id: String,
+    },
+}
+
+impl IntegrityRepairOperation {
+    pub fn target_id(&self) -> &str {
+        match self {
+            Self::RemoveDuplicateRelation { relation_id } => relation_id,
+            Self::RemoveDuplicatePrimary { reference_id } => reference_id,
+            Self::RemoveInvalidAttachment { relation_id } => relation_id,
+            Self::RemoveSelfRelation { relation_id } => relation_id,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RemoveDuplicateRelation { .. } => "remove_duplicate_relation",
+            Self::RemoveDuplicatePrimary { .. } => "remove_duplicate_primary",
+            Self::RemoveInvalidAttachment { .. } => "remove_invalid_attachment",
+            Self::RemoveSelfRelation { .. } => "remove_self_relation",
+        }
+    }
+}
+
+/// Deterministic, auditable repair plan for an integrity violation on a Work entity
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntegrityRepairPlan {
     pub work_id: String,
+    pub plan_id: String,
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub violations: Vec<IntegrityViolation>,
+    pub operations: Vec<IntegrityRepairOperation>,
+    pub repairable: bool,
+    // Retained for v0.6 backward compatibility
+    #[serde(default)]
     pub safe: bool,
+    #[serde(default)]
     pub actions: Vec<IntegrityRepairAction>,
+}
+
+impl IntegrityRepairPlan {
+    /// Deterministically computes a unique plan_id from:
+    /// work_id + sorted violation codes + sorted target object ids
+    pub fn compute_plan_id(
+        work_id: &str,
+        violations: &[IntegrityViolation],
+        operations: &[IntegrityRepairOperation],
+    ) -> String {
+        let mut codes: Vec<String> = violations.iter().map(|v| v.code.as_str().to_string()).collect();
+        codes.sort();
+
+        let mut target_ids: Vec<String> = operations.iter().map(|op| op.target_id().to_string()).collect();
+        target_ids.sort();
+
+        let raw = format!("{}:{}:{}", work_id, codes.join(","), target_ids.join(","));
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(raw.as_bytes());
+        let hash = hex::encode(hasher.finalize());
+        format!("plan_{}_{}", work_id, &hash[..16])
+    }
 }
 
 /// Architectural alias: A Work Profile represents the complete unified digital footprint for any medium.

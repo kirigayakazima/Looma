@@ -3622,7 +3622,694 @@ fn test_v06_cross_layer_recovery_preview_consistency() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+// =========================================================================
+// v0.7 Tests: BA through BO (Deterministic Repair & Integrity Recovery)
+// =========================================================================
 
+#[test]
+fn test_v07_repair_plan_determinism() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_ba_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
 
+    let work = core.create_work("suite", "Determinism Work", WorkType::Movie, RecordStatus::Planned, None, None).unwrap();
+    let other = core.create_work("suite", "Other Work", WorkType::Movie, RecordStatus::Planned, None, None).unwrap();
 
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_det_1", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_det_2", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+    ).unwrap();
 
+    raw_conn.execute(
+        "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params!["ref_det_1", work.id, "bgm", "BGM", "https://bgm.tv/1", Option::<String>::None, "{\"is_primary\": true}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params!["ref_det_2", work.id, "douban", "DB", "https://douban.com/1", Option::<String>::None, "{\"is_primary\": true}", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    let plan1 = core.preview_work_integrity_repair(&work.id).unwrap();
+    let plan2 = core.preview_work_integrity_repair(&work.id).unwrap();
+
+    assert_eq!(plan1.plan_id, plan2.plan_id);
+    assert_eq!(plan1.operations, plan2.operations);
+    assert_eq!(plan1.violations, plan2.violations);
+    assert!(plan1.repairable);
+    assert!(plan1.plan_id.starts_with("plan_"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_repair_preview_is_still_read_only() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bb_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "ReadOnly Preview Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+    let other = core.create_work("suite", "Other Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_ro_1", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_ro_2", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+
+    let rel_count_before: i64 = raw_conn.query_row("SELECT count(*) FROM relations", [], |r| r.get(0)).unwrap();
+    let ext_count_before: i64 = raw_conn.query_row("SELECT count(*) FROM external_references", [], |r| r.get(0)).unwrap();
+    let entity_count_before: i64 = raw_conn.query_row("SELECT count(*) FROM entities", [], |r| r.get(0)).unwrap();
+    drop(raw_conn);
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    assert!(plan.repairable);
+    assert!(!plan.operations.is_empty());
+
+    let raw_conn2 = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    let rel_count_after: i64 = raw_conn2.query_row("SELECT count(*) FROM relations", [], |r| r.get(0)).unwrap();
+    let ext_count_after: i64 = raw_conn2.query_row("SELECT count(*) FROM external_references", [], |r| r.get(0)).unwrap();
+    let entity_count_after: i64 = raw_conn2.query_row("SELECT count(*) FROM entities", [], |r| r.get(0)).unwrap();
+
+    assert_eq!(rel_count_before, rel_count_after);
+    assert_eq!(ext_count_before, ext_count_after);
+    assert_eq!(entity_count_before, entity_count_after);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_duplicate_relation_repair() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bc_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Dup Rel Work", WorkType::Game, RecordStatus::Planned, None, None).unwrap();
+    let other = core.create_work("suite", "Target Work", WorkType::Game, RecordStatus::Planned, None, None).unwrap();
+
+    // 3 duplicate relations:
+    // "rel_z" at 2026-01-02
+    // "rel_m" at 2026-01-01
+    // "rel_a" at 2026-01-01
+    // Earliest created_at is 2026-01-01, tie broken by lexicographical id: "rel_a" < "rel_m"
+    // Winner: "rel_a", Losers: "rel_m", "rel_z"
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_z", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_m", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_a", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    assert_eq!(plan.operations.len(), 2);
+    assert!(plan.operations.contains(&IntegrityRepairOperation::RemoveDuplicateRelation { relation_id: "rel_m".to_string() }));
+    assert!(plan.operations.contains(&IntegrityRepairOperation::RemoveDuplicateRelation { relation_id: "rel_z".to_string() }));
+
+    let report = core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+    assert!(report.valid);
+    assert_eq!(report.violations.len(), 0);
+
+    // Verify exactly "rel_a" remains
+    let relations = core.list_relations_for_item(&work.id).unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].id, "rel_a");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_duplicate_primary_repair() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bd_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Dup Primary Work", WorkType::Book, RecordStatus::Planned, None, None).unwrap();
+
+    // ref_winner created earlier
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params!["ref_winner", work.id, "bgm", "BGM", "https://bgm.tv/1", Option::<String>::None, "{\"is_primary\": true}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params!["ref_loser", work.id, "douban", "DB", "https://douban.com/1", Option::<String>::None, "{\"is_primary\": true}", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(plan.operations[0], IntegrityRepairOperation::RemoveDuplicatePrimary { reference_id: "ref_loser".to_string() });
+
+    let report = core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+    assert!(report.valid);
+
+    // Verify both rows still exist, but loser has is_primary = false
+    let refs = core.list_external_references(Some(&work.id)).unwrap();
+    assert_eq!(refs.len(), 2, "External references rows must NOT be deleted");
+
+    let winner = refs.iter().find(|r| r.id == "ref_winner").unwrap();
+    let loser = refs.iter().find(|r| r.id == "ref_loser").unwrap();
+    assert!(winner.is_primary());
+    assert!(!loser.is_primary());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_invalid_attachment_repair() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_be_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Invalid Attach Work", WorkType::Game, RecordStatus::Planned, None, None).unwrap();
+    let doc = Asset {
+        id: "asset_doc".to_string(),
+        kind: AssetKind::Document,
+        source: AssetSource::Local,
+        path: Some("D:/docs/readme.txt".to_string()),
+        size: Some(10),
+        hash: None,
+        mime_type: Some("text/plain".to_string()),
+        metadata: json!({}),
+        status: AssetStatus::Active,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        indexed_at: Utc::now(),
+    };
+    db.upsert_asset(&doc).unwrap();
+
+    let attach_rel = Relation {
+        id: "rel_invalid_attach".to_string(),
+        source_id: work.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::ATTACHES.to_string(),
+        target_id: doc.id.clone(),
+        target_type: "asset".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&attach_rel).unwrap();
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(plan.operations[0], IntegrityRepairOperation::RemoveInvalidAttachment { relation_id: "rel_invalid_attach".to_string() });
+
+    let report = core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+    assert!(report.valid);
+
+    // Verify invalid attachment relation is deleted, but doc asset is still intact
+    let rels = core.list_relations_for_item(&work.id).unwrap();
+    assert!(rels.is_empty());
+    assert!(core.get_asset(&doc.id).unwrap().is_some());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_self_relation_repair() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bf_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Self Rel Work", WorkType::Game, RecordStatus::Planned, None, None).unwrap();
+    let self_rel = Relation {
+        id: "rel_self_test".to_string(),
+        source_id: work.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::RELATED_TO.to_string(),
+        target_id: work.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&self_rel).unwrap();
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    assert_eq!(plan.operations.len(), 1);
+    assert_eq!(plan.operations[0], IntegrityRepairOperation::RemoveSelfRelation { relation_id: "rel_self_test".to_string() });
+
+    let report = core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+    assert!(report.valid);
+
+    let rels = core.list_relations_for_item(&work.id).unwrap();
+    assert!(rels.is_empty());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_missing_endpoint_not_auto_repaired() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bg_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Missing Endpoint Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_missing_endpoint", work.id, "entity", relation_types::SEQUEL_OF, "non_existent_target_999", "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    assert!(!plan.repairable, "Missing endpoint must NOT be auto-repairable");
+    assert!(!plan.safe);
+    assert!(plan.operations.is_empty(), "Must not generate operations for missing endpoint");
+
+    let res = core.repair_work_integrity("suite", &work.id, &plan.plan_id);
+    assert!(res.is_err(), "Repair must be rejected when plan has no repairable operations");
+
+    // Verify relation still exists (not auto-deleted)
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    let count: i64 = raw_conn.query_row("SELECT count(*) FROM relations WHERE id = 'rel_missing_endpoint'", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 1, "Unsafe relation must not be guessed or deleted");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_repair_transaction_rollback() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bh_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Rollback Work", WorkType::Movie, RecordStatus::Planned, None, None).unwrap();
+    let other = core.create_work("suite", "Other Work", WorkType::Movie, RecordStatus::Planned, None, None).unwrap();
+
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_rb_1", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    // Construct a plan where operation 1 would succeed, but operation 2 fails precondition (non-existent relation)
+    let bad_plan = IntegrityRepairPlan {
+        plan_id: "plan_bad_test".to_string(),
+        work_id: work.id.clone(),
+        generated_at: Utc::now(),
+        violations: vec![],
+        operations: vec![
+            IntegrityRepairOperation::RemoveDuplicateRelation { relation_id: "rel_rb_1".to_string() },
+            IntegrityRepairOperation::RemoveDuplicateRelation { relation_id: "rel_does_not_exist_xyz".to_string() },
+        ],
+        repairable: true,
+        safe: true,
+        actions: vec![],
+    };
+
+    let res = db.repair_work_integrity(&work.id, &bad_plan);
+    assert!(res.is_err(), "Transaction must fail and roll back");
+
+    // Verify rel_rb_1 was NOT deleted due to atomic rollback
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    let count: i64 = raw_conn.query_row("SELECT count(*) FROM relations WHERE id = 'rel_rb_1'", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 1, "Rollback must preserve state when transaction fails");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_stale_repair_plan_rejected() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bi_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Stale Plan Work", WorkType::Movie, RecordStatus::Planned, None, None).unwrap();
+    let other = core.create_work("suite", "Other Work", WorkType::Movie, RecordStatus::Planned, None, None).unwrap();
+
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_stale_1", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_stale_2", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    let plan1 = core.preview_work_integrity_repair(&work.id).unwrap();
+
+    // Now introduce another violation (state mutation)
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_stale_3", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-03T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    // Call repair with old plan_id -> MUST return Conflict
+    let res = core.repair_work_integrity("suite", &work.id, &plan1.plan_id);
+    assert!(res.is_err());
+    match res {
+        Err(looma_core::error::LoomaError::Conflict(msg)) => {
+            assert!(msg.contains("stale"), "Expected stale plan conflict error: {msg}");
+        }
+        other => panic!("Expected LoomaError::Conflict, got {:?}", other),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_repair_post_validation() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bj_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Post Validation Work", WorkType::Book, RecordStatus::Planned, None, None).unwrap();
+    let other = core.create_work("suite", "Target Work", WorkType::Book, RecordStatus::Planned, None, None).unwrap();
+
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_pv_1", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_pv_2", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    let report = core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+
+    // Verify post-repair integrity validation passed cleanly
+    assert!(report.valid);
+    assert!(report.violations.is_empty());
+
+    let final_check = core.validate_work_integrity(&work.id).unwrap();
+    assert!(final_check.valid);
+    assert!(final_check.violations.is_empty());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_repair_write_audit_semantics() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bk_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Audit Semantics Work", WorkType::Game, RecordStatus::Planned, None, None).unwrap();
+    let other = core.create_work("suite", "Target Work", WorkType::Game, RecordStatus::Planned, None, None).unwrap();
+
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_aud_1", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_aud_2", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    // 1. Preview Audit
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    let audits = core.list_recent_audits(20).unwrap();
+    let preview_audit = audits.iter().find(|a| a.operation == "integrity_repair_preview").expect("preview audit missing");
+    assert_eq!(preview_audit.result, "success");
+    let preview_meta = &preview_audit.details;
+    assert_eq!(preview_meta.get("write").and_then(|v| v.as_bool()), Some(false));
+
+    // 2. Conflict Audit
+    let _ = core.repair_work_integrity("suite", &work.id, "plan_stale_bogus_id");
+    let audits = core.list_recent_audits(20).unwrap();
+    let conflict_audit = audits.iter().find(|a| a.operation == "integrity_repair" && a.result == "failure").expect("conflict audit missing");
+    let conflict_meta = &conflict_audit.details;
+    assert_eq!(conflict_meta.get("reason").and_then(|v| v.as_str()), Some("stale_plan"));
+
+    // 3. Success Audit
+    core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+    let audits = core.list_recent_audits(20).unwrap();
+    let success_audit = audits.iter().find(|a| a.operation == "integrity_repair" && a.result == "success").expect("success audit missing");
+    let success_meta = &success_audit.details;
+    assert_eq!(success_meta.get("write").and_then(|v| v.as_bool()), Some(true));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_concurrent_stale_plan() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bl_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Concurrent Stale Work", WorkType::Game, RecordStatus::Planned, None, None).unwrap();
+    let other = core.create_work("suite", "Target Work", WorkType::Game, RecordStatus::Planned, None, None).unwrap();
+
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_conc_1", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_conc_2", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    // Both preview the exact same initial state
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    let plan_id = plan.plan_id.clone();
+
+    let core_a = core.clone();
+    let core_b = core.clone();
+    let work_id_a = work.id.clone();
+    let work_id_b = work.id.clone();
+    let plan_id_a = plan_id.clone();
+    let plan_id_b = plan_id.clone();
+
+    let handle_a = std::thread::spawn(move || {
+        core_a.repair_work_integrity("worker-a", &work_id_a, &plan_id_a)
+    });
+
+    let handle_b = std::thread::spawn(move || {
+        // Sleep slightly to guarantee interleaving
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        core_b.repair_work_integrity("worker-b", &work_id_b, &plan_id_b)
+    });
+
+    let res_a = handle_a.join().unwrap();
+    let res_b = handle_b.join().unwrap();
+
+    // Exactly one thread succeeds, the second thread must receive Conflict because DB changed
+    assert!(res_a.is_ok(), "First repair must succeed");
+    assert!(res_b.is_err(), "Second repair with old plan must fail");
+    match res_b {
+        Err(looma_core::error::LoomaError::Conflict(msg)) => {
+            assert!(msg.contains("stale"), "Must be rejected with stale plan conflict: {msg}");
+        }
+        other => panic!("Expected Conflict error, got {:?}", other),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_repair_preserves_unrelated_relations() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bm_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Preserve Relations Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+    let other_work = core.create_work("suite", "Prequel Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+    let person = Entity::new_person("Creator", None, None);
+    core.create_entity("suite", &person).unwrap();
+
+    // Valid relations that must remain untouched
+    let valid_creator_rel = Relation {
+        id: "rel_creator_keep".to_string(),
+        source_id: work.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::CREATED_BY.to_string(),
+        target_id: person.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&valid_creator_rel).unwrap();
+
+    let valid_prequel_rel = Relation {
+        id: "rel_prequel_keep".to_string(),
+        source_id: work.id.clone(),
+        source_type: "entity".to_string(),
+        relation_type: relation_types::PREQUEL_OF.to_string(),
+        target_id: other_work.id.clone(),
+        target_type: "entity".to_string(),
+        metadata: json!({}),
+        created_at: Utc::now(),
+    };
+    db.create_relation(&valid_prequel_rel).unwrap();
+
+    // Injected duplicate relations
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_dup_keep_1", work.id, "entity", relation_types::SEQUEL_OF, other_work.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params!["rel_dup_keep_2", work.id, "entity", relation_types::SEQUEL_OF, other_work.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+
+    let relations = core.list_relations_for_item(&work.id).unwrap();
+    // 1 creator rel + 1 prequel rel + 1 deduplicated sequel rel = 3 total
+    assert_eq!(relations.len(), 3);
+    assert!(relations.iter().any(|r| r.id == "rel_creator_keep"), "Creator relation must be preserved");
+    assert!(relations.iter().any(|r| r.id == "rel_prequel_keep"), "Prequel relation must be preserved");
+    assert!(relations.iter().any(|r| r.id == "rel_dup_keep_1"), "Winner sequel relation must be preserved");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_repair_preserves_external_references() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bn_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core = LoomaCore::new(db.clone());
+
+    let work = core.create_work("suite", "Preserve Ext Work", WorkType::Book, RecordStatus::Planned, None, None).unwrap();
+
+    // 3 external references: 2 primary, 1 non-primary
+    let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+    raw_conn.execute(
+        "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params!["ref_1", work.id, "bgm", "BGM", "https://bgm.tv/1", Option::<String>::None, "{\"is_primary\": true}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params!["ref_2", work.id, "douban", "DB", "https://douban.com/1", Option::<String>::None, "{\"is_primary\": true}", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z"],
+    ).unwrap();
+    raw_conn.execute(
+        "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params!["ref_3", work.id, "imdb", "IMDb", "https://imdb.com/1", Option::<String>::None, "{\"is_primary\": false}", "2026-01-03T00:00:00Z", "2026-01-03T00:00:00Z"],
+    ).unwrap();
+    drop(raw_conn);
+
+    let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+    core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+
+    let refs = core.list_external_references(Some(&work.id)).unwrap();
+    // Exactly 3 references remain (0 deletions)
+    assert_eq!(refs.len(), 3, "No external references should be deleted during repair");
+
+    let primary_count = refs.iter().filter(|r| r.is_primary()).count();
+    assert_eq!(primary_count, 1, "Exactly one primary reference must remain");
+
+    let non_primary_count = refs.iter().filter(|r| !r.is_primary()).count();
+    assert_eq!(non_primary_count, 2, "Other two references must have is_primary = false");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_v07_repair_cold_restart_persistence() {
+    let temp_dir = std::env::temp_dir().join(format!("looma_v07_bo_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let work_id = {
+        let db = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+        let core = LoomaCore::new(db.clone());
+
+        let work = core.create_work("suite", "Cold Restart Repair Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+        let other = core.create_work("suite", "Target Work", WorkType::Anime, RecordStatus::Planned, None, None).unwrap();
+
+        let raw_conn = rusqlite::Connection::open(temp_dir.join(".looma").join("vault.db")).unwrap();
+        raw_conn.execute(
+            "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params!["rel_cold_1", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-01T00:00:00Z"],
+        ).unwrap();
+        raw_conn.execute(
+            "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params!["rel_cold_2", work.id, "entity", relation_types::SEQUEL_OF, other.id, "entity", "{}", "2026-01-02T00:00:00Z"],
+        ).unwrap();
+        drop(raw_conn);
+
+        let plan = core.preview_work_integrity_repair(&work.id).unwrap();
+        let report = core.repair_work_integrity("suite", &work.id, &plan.plan_id).unwrap();
+        assert!(report.valid);
+        work.id
+    };
+
+    // Cold restart
+    let db2 = Arc::new(LoomaDb::open(&temp_dir).unwrap());
+    let core2 = LoomaCore::new(db2.clone());
+
+    let final_check = core2.validate_work_integrity(&work_id).unwrap();
+    assert!(final_check.valid, "Cold restart must retain valid integrity state");
+    assert!(final_check.violations.is_empty());
+
+    let relations = core2.list_relations_for_item(&work_id).unwrap();
+    assert_eq!(relations.len(), 1, "Only the single deduplicated relation must persist");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

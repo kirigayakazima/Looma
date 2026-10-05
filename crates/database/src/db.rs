@@ -101,6 +101,10 @@ impl LoomaDb {
             db_path: PathBuf::from(":memory:"),
         })
     }
+
+    pub fn repair_work_integrity(&self, work_id: &str, plan: &IntegrityRepairPlan) -> LoomaResult<()> {
+        <Self as EntityService>::repair_work_integrity(self, work_id, plan)
+    }
 }
 
 impl VaultService for LoomaDb {
@@ -812,6 +816,94 @@ impl EntityService for LoomaDb {
             .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
             .map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(count as u64)
+    }
+
+    fn repair_work_integrity(&self, _work_id: &str, plan: &IntegrityRepairPlan) -> LoomaResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        for op in &plan.operations {
+            match op {
+                IntegrityRepairOperation::RemoveDuplicateRelation { relation_id } => {
+                    let exists: bool = tx.query_row(
+                        "SELECT 1 FROM relations WHERE id = ?1",
+                        params![relation_id],
+                        |_| Ok(true),
+                    ).optional().map_err(|e| LoomaError::Database(e.to_string()))?.unwrap_or(false);
+
+                    if !exists {
+                        return Err(LoomaError::Conflict(format!(
+                            "Duplicate relation '{}' does not exist in database", relation_id
+                        )));
+                    }
+
+                    tx.execute("DELETE FROM relations WHERE id = ?1", params![relation_id])
+                        .map_err(|e| LoomaError::Database(format!("Failed to delete duplicate relation: {e}")))?;
+                }
+                IntegrityRepairOperation::RemoveDuplicatePrimary { reference_id } => {
+                    let meta_str: Option<String> = tx.query_row(
+                        "SELECT metadata_json FROM external_references WHERE id = ?1",
+                        params![reference_id],
+                        |row| row.get(0),
+                    ).optional().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+                    let meta_str = meta_str.ok_or_else(|| {
+                        LoomaError::Conflict(format!("External reference '{}' does not exist", reference_id))
+                    })?;
+
+                    let mut meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or(serde_json::json!({}));
+                    if meta.get("is_primary").and_then(|v| v.as_bool()) != Some(true) {
+                        return Err(LoomaError::Conflict(format!(
+                            "External reference '{}' is no longer primary", reference_id
+                        )));
+                    }
+
+                    if let Some(obj) = meta.as_object_mut() {
+                        obj.insert("is_primary".to_string(), serde_json::json!(false));
+                    }
+                    let now = Utc::now().to_rfc3339();
+                    tx.execute(
+                        "UPDATE external_references SET metadata_json = ?1, updated_at = ?2 WHERE id = ?3",
+                        params![serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string()), now, reference_id],
+                    ).map_err(|e| LoomaError::Database(format!("Failed to demote primary reference: {e}")))?;
+                }
+                IntegrityRepairOperation::RemoveInvalidAttachment { relation_id } => {
+                    let exists: bool = tx.query_row(
+                        "SELECT 1 FROM relations WHERE id = ?1",
+                        params![relation_id],
+                        |_| Ok(true),
+                    ).optional().map_err(|e| LoomaError::Database(e.to_string()))?.unwrap_or(false);
+
+                    if !exists {
+                        return Err(LoomaError::Conflict(format!(
+                            "Invalid attachment relation '{}' does not exist", relation_id
+                        )));
+                    }
+
+                    tx.execute("DELETE FROM relations WHERE id = ?1", params![relation_id])
+                        .map_err(|e| LoomaError::Database(format!("Failed to delete invalid attachment relation: {e}")))?;
+                }
+                IntegrityRepairOperation::RemoveSelfRelation { relation_id } => {
+                    let exists: bool = tx.query_row(
+                        "SELECT 1 FROM relations WHERE id = ?1",
+                        params![relation_id],
+                        |_| Ok(true),
+                    ).optional().map_err(|e| LoomaError::Database(e.to_string()))?.unwrap_or(false);
+
+                    if !exists {
+                        return Err(LoomaError::Conflict(format!(
+                            "Self relation '{}' does not exist", relation_id
+                        )));
+                    }
+
+                    tx.execute("DELETE FROM relations WHERE id = ?1", params![relation_id])
+                        .map_err(|e| LoomaError::Database(format!("Failed to delete self relation: {e}")))?;
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| LoomaError::Database(format!("Failed to commit repair transaction: {e}")))?;
+        Ok(())
     }
 }
 

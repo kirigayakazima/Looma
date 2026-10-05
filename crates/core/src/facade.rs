@@ -988,66 +988,135 @@ impl LoomaCore {
     /// Does NOT perform any writes to the database.
     pub fn preview_work_integrity_repair(&self, work_id: &str) -> LoomaResult<IntegrityRepairPlan> {
         let report = self.validate_work_integrity(work_id)?;
+        let mut operations = Vec::new();
         let mut actions = Vec::new();
-        let mut safe = true;
+        let mut has_unrepairable = false;
 
         if report.valid {
+            let plan_id = IntegrityRepairPlan::compute_plan_id(work_id, &report.violations, &[]);
+            let _ = self.record_audit(
+                "system",
+                "integrity_repair_preview",
+                "work",
+                work_id,
+                "success",
+                json!({
+                    "action": "integrity_repair_preview",
+                    "plan_id": plan_id,
+                    "write": false,
+                    "repairable": false,
+                    "operations_count": 0
+                }),
+            );
             return Ok(IntegrityRepairPlan {
                 work_id: work_id.to_string(),
+                plan_id,
+                generated_at: Utc::now(),
+                violations: Vec::new(),
+                operations: Vec::new(),
+                repairable: false,
                 safe: true,
                 actions: Vec::new(),
             });
         }
 
+        // 1. Deterministic Primary Resolution (Earliest created_at, then lexicographically smallest id)
+        if report.violations.iter().any(|v| v.code == IntegrityViolationCode::DuplicatePrimary) {
+            let refs = self.list_external_references(Some(work_id))?;
+            let mut primary_refs: Vec<_> = refs.into_iter().filter(|r| r.is_primary()).collect();
+            if primary_refs.len() > 1 {
+                primary_refs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+                let winner = &primary_refs[0];
+                for demotee in &primary_refs[1..] {
+                    operations.push(IntegrityRepairOperation::RemoveDuplicatePrimary {
+                        reference_id: demotee.id.clone(),
+                    });
+                    actions.push(IntegrityRepairAction {
+                        kind: RepairActionKind::DemoteDuplicatePrimary,
+                        description: format!("Demote redundant primary flag on reference '{}' (retaining '{}')", demotee.id, winner.id),
+                        target_id: demotee.id.clone(),
+                        details: json!({
+                            "retained_primary_id": winner.id,
+                            "demoted_reference_id": demotee.id,
+                        }),
+                    });
+                }
+            }
+        }
+
+        // 2. Deterministic Duplicate Relation Resolution (Earliest created_at, then lexicographically smallest id)
+        if report.violations.iter().any(|v| v.code == IntegrityViolationCode::DuplicateRelation) {
+            let source_relations = self.list_relations_for_source(work_id)?;
+            let mut grouped: std::collections::HashMap<(String, String, String), Vec<Relation>> = std::collections::HashMap::new();
+            for r in source_relations {
+                grouped.entry((r.source_id.clone(), r.relation_type.clone(), r.target_id.clone()))
+                    .or_default()
+                    .push(r);
+            }
+
+            for (_key, mut group) in grouped {
+                if group.len() > 1 {
+                    group.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+                    let winner = &group[0];
+                    for loser in &group[1..] {
+                        operations.push(IntegrityRepairOperation::RemoveDuplicateRelation {
+                            relation_id: loser.id.clone(),
+                        });
+                        actions.push(IntegrityRepairAction {
+                            kind: RepairActionKind::RemoveDuplicateRelation,
+                            description: format!("Remove redundant duplicate relation '{}' (retaining '{}')", loser.id, winner.id),
+                            target_id: loser.id.clone(),
+                            details: json!({
+                                "retained_relation_id": winner.id,
+                                "removed_relation_id": loser.id,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 3. Inspect other violation codes
         for v in &report.violations {
             match v.code {
-                IntegrityViolationCode::DuplicatePrimary => {
-                    let refs = self.list_external_references(Some(work_id))?;
-                    let mut primary_refs: Vec<_> = refs.into_iter().filter(|r| r.is_primary()).collect();
-                    primary_refs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
-                    if primary_refs.len() > 1 {
-                        for demotee in &primary_refs[1..] {
+                IntegrityViolationCode::InvalidAttachmentDirection | IntegrityViolationCode::InvalidAttachmentKind => {
+                    if let Some(ref rel_id) = v.relation_id {
+                        if !operations.iter().any(|op| match op {
+                            IntegrityRepairOperation::RemoveInvalidAttachment { relation_id } => relation_id == rel_id,
+                            _ => false,
+                        }) {
+                            operations.push(IntegrityRepairOperation::RemoveInvalidAttachment {
+                                relation_id: rel_id.clone(),
+                            });
                             actions.push(IntegrityRepairAction {
-                                kind: RepairActionKind::DemoteDuplicatePrimary,
-                                description: format!("Demote redundant primary flag on reference '{}' (retaining '{}')", demotee.id, primary_refs[0].id),
-                                target_id: demotee.id.clone(),
-                                details: json!({
-                                    "retained_primary_id": primary_refs[0].id,
-                                    "demoted_reference_id": demotee.id,
-                                }),
+                                kind: RepairActionKind::DetachInvalidAttachment,
+                                description: format!("Detach invalid attachment relation '{}'", rel_id),
+                                target_id: rel_id.clone(),
+                                details: json!({ "violation_message": v.message }),
                             });
                         }
                     }
                 }
-                IntegrityViolationCode::DuplicateRelation => {
-                    let rel_id = v.relation_id.clone().unwrap_or_default();
-                    actions.push(IntegrityRepairAction {
-                        kind: RepairActionKind::RemoveDuplicateRelation,
-                        description: format!("Remove redundant duplicate relation '{}'", rel_id),
-                        target_id: rel_id,
-                        details: json!({ "violation_message": v.message }),
-                    });
-                }
-                IntegrityViolationCode::InvalidAttachmentDirection | IntegrityViolationCode::InvalidAttachmentKind => {
-                    let rel_id = v.relation_id.clone().unwrap_or_default();
-                    actions.push(IntegrityRepairAction {
-                        kind: RepairActionKind::DetachInvalidAttachment,
-                        description: format!("Detach invalid attachment relation '{}'", rel_id),
-                        target_id: rel_id,
-                        details: json!({ "violation_message": v.message }),
-                    });
-                }
                 IntegrityViolationCode::SelfRelation => {
-                    let rel_id = v.relation_id.clone().unwrap_or_default();
-                    actions.push(IntegrityRepairAction {
-                        kind: RepairActionKind::RemoveSelfRelation,
-                        description: format!("Remove self-referencing relation '{}'", rel_id),
-                        target_id: rel_id,
-                        details: json!({ "violation_message": v.message }),
-                    });
+                    if let Some(ref rel_id) = v.relation_id {
+                        if !operations.iter().any(|op| match op {
+                            IntegrityRepairOperation::RemoveSelfRelation { relation_id } => relation_id == rel_id,
+                            _ => false,
+                        }) {
+                            operations.push(IntegrityRepairOperation::RemoveSelfRelation {
+                                relation_id: rel_id.clone(),
+                            });
+                            actions.push(IntegrityRepairAction {
+                                kind: RepairActionKind::RemoveSelfRelation,
+                                description: format!("Remove self-referencing relation '{}'", rel_id),
+                                target_id: rel_id.clone(),
+                                details: json!({ "violation_message": v.message }),
+                            });
+                        }
+                    }
                 }
                 IntegrityViolationCode::MissingRelationEndpoint => {
-                    safe = false;
+                    has_unrepairable = true;
                     let rel_id = v.relation_id.clone().unwrap_or_default();
                     actions.push(IntegrityRepairAction {
                         kind: RepairActionKind::InspectMissingEndpoint,
@@ -1057,7 +1126,7 @@ impl LoomaCore {
                     });
                 }
                 IntegrityViolationCode::WorkNotFound | IntegrityViolationCode::NotAWork => {
-                    safe = false;
+                    has_unrepairable = true;
                     actions.push(IntegrityRepairAction {
                         kind: RepairActionKind::InspectMissingEntity,
                         description: format!("Entity '{}' missing or not a work entity", work_id),
@@ -1065,17 +1134,167 @@ impl LoomaCore {
                         details: json!({ "violation_message": v.message }),
                     });
                 }
+                IntegrityViolationCode::DuplicatePrimary | IntegrityViolationCode::DuplicateRelation => {
+                    // Already processed with deterministic ordering above
+                }
                 _ => {
-                    safe = false;
+                    has_unrepairable = true;
                 }
             }
         }
 
+        // Section 6: If unrepairable violations exist, do not generate automatic repair operations
+        if has_unrepairable {
+            operations.clear();
+        }
+
+        let repairable = !has_unrepairable && !operations.is_empty();
+        let safe = !has_unrepairable;
+
+        let plan_id = IntegrityRepairPlan::compute_plan_id(work_id, &report.violations, &operations);
+
+        let _ = self.record_audit(
+            "system",
+            "integrity_repair_preview",
+            "work",
+            work_id,
+            "success",
+            json!({
+                "action": "integrity_repair_preview",
+                "plan_id": plan_id,
+                "write": false,
+                "repairable": repairable,
+                "operations_count": operations.len()
+            }),
+        );
+
         Ok(IntegrityRepairPlan {
             work_id: work_id.to_string(),
+            plan_id,
+            generated_at: Utc::now(),
+            violations: report.violations,
+            operations,
+            repairable,
             safe,
             actions,
         })
+    }
+
+    /// Executes an authorized, transactional repair plan for a Work entity.
+    ///
+    /// Guardrails:
+    /// - Revalidates current plan identity (stale plan protection)
+    /// - Executes in a single SQLite transaction via LoomaDb
+    /// - Full rollback if any operation fails
+    /// - Revalidates integrity after transaction commit
+    /// - Audits all outcomes (preview, success, conflict, failure)
+    pub fn repair_work_integrity(
+        &self,
+        actor: &str,
+        work_id: &str,
+        plan_id: &str,
+    ) -> LoomaResult<IntegrityReport> {
+        // 1. Preview current repair plan
+        let current_plan = self.preview_work_integrity_repair(work_id)?;
+
+        // 2. Validate plan staleness
+        if plan_id != current_plan.plan_id {
+            let msg = format!(
+                "Integrity repair plan is stale. Expected plan: {}, Current plan: {}",
+                plan_id, current_plan.plan_id
+            );
+            let _ = self.record_audit(
+                actor,
+                "integrity_repair",
+                "work",
+                work_id,
+                "failure",
+                json!({
+                    "action": "integrity_repair",
+                    "reason": "stale_plan",
+                    "expected_plan": plan_id,
+                    "current_plan": current_plan.plan_id
+                }),
+            );
+            return Err(LoomaError::Conflict(msg));
+        }
+
+        // 3. Reject if unrepairable
+        if !current_plan.repairable {
+            return Err(LoomaError::Validation(format!(
+                "Integrity repair plan '{}' contains unrepairable violations",
+                plan_id
+            )));
+        }
+
+        // 4. If no operations needed (already clean)
+        if current_plan.operations.is_empty() {
+            return self.validate_work_integrity(work_id);
+        }
+
+        // 4. Single-transaction repair execution
+        if let Err(e) = self.repo.repair_work_integrity(work_id, &current_plan) {
+            let _ = self.record_audit(
+                actor,
+                "integrity_repair",
+                "work",
+                work_id,
+                "failure",
+                json!({
+                    "action": "integrity_repair",
+                    "reason": "transaction_rollback",
+                    "error": e.to_string(),
+                    "plan_id": plan_id
+                }),
+            );
+            return Err(e);
+        }
+
+        // 5. Mandatory post-repair integrity validation
+        let post_report = self.validate_work_integrity(work_id)?;
+        if !post_report.valid {
+            let _ = self.record_audit(
+                actor,
+                "integrity_repair",
+                "work",
+                work_id,
+                "failure",
+                json!({
+                    "action": "integrity_repair",
+                    "reason": "repair_completed_but_integrity_failed",
+                    "plan_id": plan_id,
+                    "violations": post_report.violations
+                }),
+            );
+            return Err(LoomaError::Integrity(format!(
+                "Work integrity repair completed but post-repair integrity check failed for '{}'",
+                work_id
+            )));
+        }
+
+        // 6. Record successful write audit
+        self.record_audit(
+            actor,
+            "integrity_repair",
+            "work",
+            work_id,
+            "success",
+            json!({
+                "action": "integrity_repair",
+                "plan_id": plan_id,
+                "applied_operations": current_plan.operations.len(),
+                "write": true
+            }),
+        )?;
+
+        self.emit_event(
+            actor,
+            DomainEvent::EntityUpdated {
+                id: work_id.to_string(),
+            },
+        );
+
+        Ok(post_report)
     }
 
     pub fn link_work_directory(
