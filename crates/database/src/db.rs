@@ -997,29 +997,45 @@ impl RelationService for LoomaDb {
             return Err(LoomaError::NotFound(format!("Work entity not found: {work_id}")));
         }
 
-        // 2. Validate old asset exists
-        let old_asset_count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM assets WHERE id = ?1",
+        // 2. Validate old asset exists and kind is Directory
+        let old_asset_row: Option<(String,)> = tx.query_row(
+            "SELECT kind FROM assets WHERE id = ?1",
             params![old_asset_id],
-            |r| r.get(0),
-        ).map_err(|e| LoomaError::Database(e.to_string()))?;
-        if old_asset_count == 0 {
-            return Err(LoomaError::NotFound(format!("Old asset not found: {old_asset_id}")));
+            |r| Ok((r.get(0)?,)),
+        ).optional().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let old_kind_str = match old_asset_row {
+            Some((k,)) => k,
+            None => return Err(LoomaError::NotFound(format!("Old asset not found: {old_asset_id}"))),
+        };
+
+        if old_kind_str != "directory" {
+            return Err(LoomaError::Validation(format!(
+                "Asset {old_asset_id} is not a directory asset"
+            )));
         }
 
-        // 3. Validate old asset is linked to work
+        // 3. Validate old asset is linked to work strictly as ATTACHES relation
+        // Direction must be source = work_id, target = old_asset_id, relation_type = attaches
         let rel_count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM relations WHERE ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))",
+            "SELECT COUNT(*) FROM relations WHERE source_id = ?1 AND target_id = ?2 AND relation_type = 'attaches'",
             params![work_id, old_asset_id],
             |r| r.get(0),
         ).map_err(|e| LoomaError::Database(e.to_string()))?;
         if rel_count == 0 {
             return Err(LoomaError::Validation(format!(
-                "Old asset {old_asset_id} is not linked to work {work_id}"
+                "Old asset {old_asset_id} is not linked to work {work_id} via attaches relation"
             )));
         }
 
-        // 4. Upsert new Asset
+        // 4. Validate new asset is a directory and upsert
+        if new_asset.kind != AssetKind::Directory {
+            return Err(LoomaError::Validation(format!(
+                "New asset {} is not a directory asset",
+                new_asset.id
+            )));
+        }
+
         let meta_str = serde_json::to_string(&new_asset.metadata).unwrap_or_else(|_| "{}".to_string());
         tx.execute(
             "INSERT INTO assets (id, kind, source, path, size, hash, mime_type, metadata_json, status, created_at, modified_at, indexed_at)
@@ -1051,28 +1067,34 @@ impl RelationService for LoomaDb {
             ],
         ).map_err(|e| LoomaError::Database(format!("Failed to upsert new asset: {e}")))?;
 
-        // 5. Delete old relation between work_id and old_asset_id
+        // 5. Delete strictly old attaches relation between work_id and old_asset_id
+        // Preserves any other relations (e.g. references) between work_id and old_asset_id
         tx.execute(
-            "DELETE FROM relations WHERE (source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1)",
+            "DELETE FROM relations WHERE source_id = ?1 AND target_id = ?2 AND relation_type = 'attaches'",
             params![work_id, old_asset_id],
-        ).map_err(|e| LoomaError::Database(format!("Failed to delete old relation: {e}")))?;
+        ).map_err(|e| LoomaError::Database(format!("Failed to delete old attaches relation: {e}")))?;
 
-        // 6. Insert new relation between work_id and new_asset.id
-        let rel_meta_str = serde_json::to_string(&new_relation.metadata).unwrap_or_else(|_| "{}".to_string());
-        tx.execute(
-            "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                new_relation.id,
-                new_relation.source_id,
-                new_relation.source_type,
-                new_relation.relation_type,
-                new_relation.target_id,
-                new_relation.target_type,
-                rel_meta_str,
-                new_relation.created_at.to_rfc3339(),
-            ],
-        ).map_err(|e| LoomaError::Database(format!("Failed to insert new relation: {e}")))?;
+        // 6. Check if target relation already exists (Section 7.1 Existing Target Idempotency)
+        let existing_target_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM relations WHERE source_id = ?1 AND target_id = ?2 AND relation_type = 'attaches'",
+            params![work_id, new_asset.id],
+            |r| r.get(0),
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        if existing_target_count == 0 {
+            let rel_meta_str = serde_json::to_string(&new_relation.metadata).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+                 VALUES (?1, ?2, 'entity', 'attaches', ?3, 'asset', ?4, ?5)",
+                params![
+                    new_relation.id,
+                    work_id,
+                    new_asset.id,
+                    rel_meta_str,
+                    new_relation.created_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(format!("Failed to insert new relation: {e}")))?;
+        }
 
         tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(())

@@ -787,17 +787,22 @@ impl LoomaCore {
             return Err(LoomaError::NotFound(format!("Work entity not found: {work_id}")));
         }
 
-        // Pre-validation 2: Old asset must exist
+        // Pre-validation 2: Old asset must exist and be a directory
         let old_asset = self.get_asset(old_asset_id)?
             .ok_or_else(|| LoomaError::NotFound(format!("Old asset not found: {old_asset_id}")))?;
+        if old_asset.kind != AssetKind::Directory {
+            return Err(LoomaError::Validation(format!(
+                "Asset {old_asset_id} is not a directory asset"
+            )));
+        }
 
-        // Pre-validation 3: Old asset must be linked to work
-        let existing_relations = self.list_relations_for_item(work_id)?;
-        let old_rel = existing_relations.iter().find(|r| {
-            (r.source_id == work_id && r.target_id == old_asset_id)
-                || (r.source_id == old_asset_id && r.target_id == work_id)
+        // Pre-validation 3: Old asset must be linked to work strictly via ATTACHES relation
+        // Direction must be source = work_id, target = old_asset_id
+        let existing_source_relations = self.list_relations_for_source(work_id)?;
+        let old_rel = existing_source_relations.iter().find(|r| {
+            r.target_id == old_asset_id && r.relation_type == relation_types::ATTACHES
         }).ok_or_else(|| LoomaError::Validation(format!(
-            "Old asset {old_asset_id} is not linked to work {work_id}"
+            "Old asset {old_asset_id} is not linked to work {work_id} via attaches relation"
         )))?;
 
         // Pre-validation 4: Validate new path exists on disk and is a directory
@@ -826,6 +831,11 @@ impl LoomaCore {
 
         // Prepare new asset (reuse if path already in DB, or create new)
         let new_asset = if let Some(existing) = self.get_asset_by_path(&norm_path)? {
+            if existing.kind != AssetKind::Directory {
+                return Err(LoomaError::Validation(format!(
+                    "Target asset {} is not a directory asset", existing.id
+                )));
+            }
             existing
         } else {
             let dir_name = p
@@ -871,8 +881,19 @@ impl LoomaCore {
             created_at: Utc::now(),
         };
 
-        // Atomically relocate in DB (single transaction: upsert new asset, delete old relation, insert new relation)
+        // Check if target is already attached to work
+        let existing_target_rel = existing_source_relations.iter().find(|r| {
+            r.target_id == new_asset.id && r.relation_type == relation_types::ATTACHES
+        });
+
+        // Atomically relocate in DB (single transaction: upsert new asset, delete old relation, insert new relation if needed)
         self.repo.relocate_work_directory(work_id, old_asset_id, &new_asset, &new_rel)?;
+
+        let final_rel = if let Some(existing_r) = existing_target_rel {
+            existing_r.clone()
+        } else {
+            new_rel.clone()
+        };
 
         self.record_audit(
             actor,
@@ -890,13 +911,13 @@ impl LoomaCore {
         self.emit_event(
             actor,
             DomainEvent::RelationCreated {
-                id: new_rel.id.clone(),
+                id: final_rel.id.clone(),
                 source_id: work_id.to_string(),
                 target_id: new_asset.id.clone(),
             },
         );
 
-        Ok((new_asset, new_rel))
+        Ok((new_asset, final_rel))
     }
 
     /// Update type-specific metadata overlay on a Work entity
