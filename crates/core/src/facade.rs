@@ -822,29 +822,48 @@ impl LoomaCore {
         let entity = match self.get_entity(work_id)? {
             Some(e) => e,
             None => {
-                return Ok(IntegrityReport::with_violations(vec![IntegrityViolation::new(
-                    "work_not_found",
-                    format!("Work entity '{work_id}' not found"),
-                )]));
+                return Ok(IntegrityReport::with_violations(
+                    vec![IntegrityViolation::with_context(
+                        IntegrityViolationCode::WorkNotFound,
+                        format!("Work entity '{work_id}' not found"),
+                        Some(work_id.to_string()),
+                        None,
+                        None,
+                    )],
+                    0,
+                    0,
+                    0,
+                ));
             }
         };
 
         if entity.as_work_metadata().is_none() && entity.entity_type != "work" {
-            return Ok(IntegrityReport::with_violations(vec![IntegrityViolation::new(
-                "not_a_work",
-                format!("Entity '{work_id}' has entity_type '{}', expected a work entity", entity.entity_type),
-            )]));
+            return Ok(IntegrityReport::with_violations(
+                vec![IntegrityViolation::with_context(
+                    IntegrityViolationCode::NotAWork,
+                    format!("Entity '{work_id}' has entity_type '{}', expected a work entity", entity.entity_type),
+                    Some(work_id.to_string()),
+                    None,
+                    None,
+                )],
+                0,
+                0,
+                0,
+            ));
         }
 
         // 2. External References Primary Invariant (at most 1 primary)
         let ext_refs = self.list_external_references(Some(work_id))?;
         let primary_count = ext_refs.iter().filter(|r| r.is_primary()).count();
         if primary_count > 1 {
-            violations.push(IntegrityViolation::new(
-                "duplicate_primary",
+            violations.push(IntegrityViolation::with_context(
+                IntegrityViolationCode::DuplicatePrimary,
                 format!(
                     "Work '{work_id}' has {primary_count} primary external references, maximum allowed is 1"
                 ),
+                Some(work_id.to_string()),
+                None,
+                None,
             ));
         }
 
@@ -852,48 +871,61 @@ impl LoomaCore {
         let relations = self.list_relations_for_item(work_id)?;
         let mut seen_identities = std::collections::HashSet::new();
         let mut seen_attached_assets = std::collections::HashSet::new();
+        let mut checked_assets = std::collections::HashSet::new();
 
         for r in &relations {
             // 3a. Self-relation check
             if r.source_id == r.target_id {
-                violations.push(IntegrityViolation::new(
-                    "self_relation",
+                violations.push(IntegrityViolation::with_context(
+                    IntegrityViolationCode::SelfRelation,
                     format!(
                         "Relation '{}' has identical source and target endpoint: '{}'",
                         r.id, r.source_id
                     ),
+                    Some(work_id.to_string()),
+                    Some(r.id.clone()),
+                    None,
                 ));
             }
 
             // 3b. Missing endpoints check
             if !self.check_item_exists(&r.source_id, &r.source_type)? {
-                violations.push(IntegrityViolation::new(
-                    "missing_relation_endpoint",
+                violations.push(IntegrityViolation::with_context(
+                    IntegrityViolationCode::MissingRelationEndpoint,
                     format!(
                         "Relation '{}' source {} '{}' does not exist",
                         r.id, r.source_type, r.source_id
                     ),
+                    Some(work_id.to_string()),
+                    Some(r.id.clone()),
+                    None,
                 ));
             }
             if !self.check_item_exists(&r.target_id, &r.target_type)? {
-                violations.push(IntegrityViolation::new(
-                    "missing_relation_endpoint",
+                violations.push(IntegrityViolation::with_context(
+                    IntegrityViolationCode::MissingRelationEndpoint,
                     format!(
                         "Relation '{}' target {} '{}' does not exist",
                         r.id, r.target_type, r.target_id
                     ),
+                    Some(work_id.to_string()),
+                    Some(r.id.clone()),
+                    None,
                 ));
             }
 
             // 3c. Duplicate relation check (Logical Identity: source_id, relation_type, target_id)
             let identity = (r.source_id.clone(), r.relation_type.clone(), r.target_id.clone());
             if !seen_identities.insert(identity.clone()) {
-                violations.push(IntegrityViolation::new(
-                    "duplicate_relation",
+                violations.push(IntegrityViolation::with_context(
+                    IntegrityViolationCode::DuplicateRelation,
                     format!(
                         "Duplicate relation detected: source='{}', type='{}', target='{}'",
                         identity.0, identity.1, identity.2
                     ),
+                    Some(work_id.to_string()),
+                    Some(r.id.clone()),
+                    None,
                 ));
             }
 
@@ -901,40 +933,149 @@ impl LoomaCore {
             if r.relation_type == relation_types::ATTACHES {
                 if r.target_id == work_id {
                     // Reverse attachment detected!
-                    violations.push(IntegrityViolation::new(
-                        "invalid_attachment_direction",
+                    violations.push(IntegrityViolation::with_context(
+                        IntegrityViolationCode::InvalidAttachmentDirection,
                         format!(
                             "Reverse attachment detected: asset '{}' -> work '{}'",
                             r.source_id, r.target_id
                         ),
+                        Some(work_id.to_string()),
+                        Some(r.id.clone()),
+                        None,
                     ));
                 } else if r.source_id == work_id {
                     // Target must be directory asset
+                    checked_assets.insert(r.target_id.clone());
                     if let Ok(Some(asset)) = self.get_asset(&r.target_id) {
                         if asset.kind != AssetKind::Directory {
-                            violations.push(IntegrityViolation::new(
-                                "invalid_attachment_asset_kind",
+                            violations.push(IntegrityViolation::with_context(
+                                IntegrityViolationCode::InvalidAttachmentKind,
                                 format!(
                                     "Attachment target asset '{}' is of kind '{:?}', expected Directory",
                                     asset.id, asset.kind
                                 ),
+                                Some(work_id.to_string()),
+                                Some(r.id.clone()),
+                                None,
                             ));
                         }
                     }
                     if !seen_attached_assets.insert(r.target_id.clone()) {
-                        violations.push(IntegrityViolation::new(
-                            "duplicate_attachment",
+                        violations.push(IntegrityViolation::with_context(
+                            IntegrityViolationCode::DuplicateRelation,
                             format!(
                                 "Work '{work_id}' has duplicate attachment to directory asset '{}'",
                                 r.target_id
                             ),
+                            Some(work_id.to_string()),
+                            Some(r.id.clone()),
+                            None,
                         ));
                     }
                 }
             }
         }
 
-        Ok(IntegrityReport::with_violations(violations))
+        Ok(IntegrityReport::with_violations(
+            violations,
+            relations.len(),
+            ext_refs.len(),
+            checked_assets.len(),
+        ))
+    }
+
+    /// Deterministic, read-only preview of repair actions for an integrity violation on a Work entity.
+    /// Does NOT perform any writes to the database.
+    pub fn preview_work_integrity_repair(&self, work_id: &str) -> LoomaResult<IntegrityRepairPlan> {
+        let report = self.validate_work_integrity(work_id)?;
+        let mut actions = Vec::new();
+        let mut safe = true;
+
+        if report.valid {
+            return Ok(IntegrityRepairPlan {
+                work_id: work_id.to_string(),
+                safe: true,
+                actions: Vec::new(),
+            });
+        }
+
+        for v in &report.violations {
+            match v.code {
+                IntegrityViolationCode::DuplicatePrimary => {
+                    let refs = self.list_external_references(Some(work_id))?;
+                    let mut primary_refs: Vec<_> = refs.into_iter().filter(|r| r.is_primary()).collect();
+                    primary_refs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+                    if primary_refs.len() > 1 {
+                        for demotee in &primary_refs[1..] {
+                            actions.push(IntegrityRepairAction {
+                                kind: RepairActionKind::DemoteDuplicatePrimary,
+                                description: format!("Demote redundant primary flag on reference '{}' (retaining '{}')", demotee.id, primary_refs[0].id),
+                                target_id: demotee.id.clone(),
+                                details: json!({
+                                    "retained_primary_id": primary_refs[0].id,
+                                    "demoted_reference_id": demotee.id,
+                                }),
+                            });
+                        }
+                    }
+                }
+                IntegrityViolationCode::DuplicateRelation => {
+                    let rel_id = v.relation_id.clone().unwrap_or_default();
+                    actions.push(IntegrityRepairAction {
+                        kind: RepairActionKind::RemoveDuplicateRelation,
+                        description: format!("Remove redundant duplicate relation '{}'", rel_id),
+                        target_id: rel_id,
+                        details: json!({ "violation_message": v.message }),
+                    });
+                }
+                IntegrityViolationCode::InvalidAttachmentDirection | IntegrityViolationCode::InvalidAttachmentKind => {
+                    let rel_id = v.relation_id.clone().unwrap_or_default();
+                    actions.push(IntegrityRepairAction {
+                        kind: RepairActionKind::DetachInvalidAttachment,
+                        description: format!("Detach invalid attachment relation '{}'", rel_id),
+                        target_id: rel_id,
+                        details: json!({ "violation_message": v.message }),
+                    });
+                }
+                IntegrityViolationCode::SelfRelation => {
+                    let rel_id = v.relation_id.clone().unwrap_or_default();
+                    actions.push(IntegrityRepairAction {
+                        kind: RepairActionKind::RemoveSelfRelation,
+                        description: format!("Remove self-referencing relation '{}'", rel_id),
+                        target_id: rel_id,
+                        details: json!({ "violation_message": v.message }),
+                    });
+                }
+                IntegrityViolationCode::MissingRelationEndpoint => {
+                    safe = false;
+                    let rel_id = v.relation_id.clone().unwrap_or_default();
+                    actions.push(IntegrityRepairAction {
+                        kind: RepairActionKind::InspectMissingEndpoint,
+                        description: format!("Inspect dangling relation endpoint for relation '{}'", rel_id),
+                        target_id: rel_id,
+                        details: json!({ "violation_message": v.message }),
+                    });
+                }
+                IntegrityViolationCode::WorkNotFound | IntegrityViolationCode::NotAWork => {
+                    safe = false;
+                    actions.push(IntegrityRepairAction {
+                        kind: RepairActionKind::InspectMissingEntity,
+                        description: format!("Entity '{}' missing or not a work entity", work_id),
+                        target_id: work_id.to_string(),
+                        details: json!({ "violation_message": v.message }),
+                    });
+                }
+                _ => {
+                    safe = false;
+                }
+            }
+        }
+
+        Ok(IntegrityRepairPlan {
+            work_id: work_id.to_string(),
+            safe,
+            actions,
+        })
     }
 
     pub fn link_work_directory(

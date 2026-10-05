@@ -560,6 +560,17 @@ impl McpServer {
                     "required": ["work_id"]
                 }
             }),
+            json!({
+                "name": "preview_work_integrity_repair",
+                "description": "[ReadOnly] Generate a deterministic preview of repair actions for an integrity violation on a Work entity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "work_id": { "type": "string", "description": "Work Entity ID" }
+                    },
+                    "required": ["work_id"]
+                }
+            }),
 
             // Content write tools
             json!({
@@ -993,6 +1004,13 @@ impl McpServer {
                 let work_id = args.get("work_id").and_then(|v| v.as_str()).ok_or("Missing work_id")?;
                 let report = self.core.validate_work_integrity(work_id).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
+            }
+
+            "preview_work_integrity_repair" => {
+                self.check_permission(McpPermissionLevel::ReadOnly, "preview_work_integrity_repair")?;
+                let work_id = args.get("work_id").and_then(|v| v.as_str()).ok_or("Missing work_id")?;
+                let plan = self.core.preview_work_integrity_repair(work_id).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())
             }
 
             // Content write tools

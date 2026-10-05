@@ -648,12 +648,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             WorkCommands::Check { id } => {
                 let report = core.validate_work_integrity(&id)?;
                 if report.valid {
-                    println!("Work Integrity: PASS");
-                    println!("No violations found.");
+                    println!("Work Integrity: PASS\n");
+                    println!("Checked:");
+                    println!("  Relations:  {}", report.checked_relations);
+                    println!("  References: {}", report.checked_references);
+                    println!("  Assets:     {}", report.checked_assets);
+                    println!("\nNo violations found.");
                 } else {
                     println!("Work Integrity: FAIL\n");
                     for v in &report.violations {
-                        println!("- {}", v.message);
+                        println!("[{}]", v.code.as_str());
+                        println!("{}\n", v.message);
                     }
                     std::process::exit(1);
                 }

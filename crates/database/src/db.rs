@@ -12,6 +12,14 @@ use looma_core::services::*;
 use crate::migration::run_migrations;
 
 #[derive(Clone)]
+/// The unified SQLite database implementation for Looma.
+///
+/// # Concurrency Guarantee Boundary (v0.6 Specification):
+/// - **Guaranteed**: In-process multi-threading across threads sharing the same `LoomaDb` instance
+///   is serialized via `Arc<Mutex<Connection>>` and transaction boundaries.
+/// - **Not Guaranteed / Out of Current Scope**: Concurrent multi-process database file access
+///   by independent OS processes, concurrent external SQLite write processes, or distributed/NFS
+///   filesystem access without external distributed lock coordination.
 pub struct LoomaDb {
     conn: Arc<Mutex<Connection>>,
     vault_path: PathBuf,

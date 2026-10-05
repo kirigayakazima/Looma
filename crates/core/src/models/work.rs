@@ -606,18 +606,84 @@ pub struct WorkSummary {
     pub external_references: Vec<ExternalReference>,
 }
 
+/// Machine-readable invariant violation code
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityViolationCode {
+    DuplicatePrimary,
+    DuplicateRelation,
+    InvalidAttachmentDirection,
+    InvalidAttachmentKind,
+    SelfRelation,
+    MissingRelationEndpoint,
+    DanglingAsset,
+    DanglingReference,
+    InvalidWorkMetadata,
+    WorkNotFound,
+    NotAWork,
+    #[serde(other)]
+    Unknown,
+}
+
+impl IntegrityViolationCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DuplicatePrimary => "duplicate_primary",
+            Self::DuplicateRelation => "duplicate_relation",
+            Self::InvalidAttachmentDirection => "invalid_attachment_direction",
+            Self::InvalidAttachmentKind => "invalid_attachment_kind",
+            Self::SelfRelation => "self_relation",
+            Self::MissingRelationEndpoint => "missing_relation_endpoint",
+            Self::DanglingAsset => "dangling_asset",
+            Self::DanglingReference => "dangling_reference",
+            Self::InvalidWorkMetadata => "invalid_work_metadata",
+            Self::WorkNotFound => "work_not_found",
+            Self::NotAWork => "not_a_work",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Integrity violation item detected on a Work entity
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IntegrityViolation {
+    pub code: IntegrityViolationCode,
+    #[serde(default)]
     pub kind: String,
     pub message: String,
+    pub entity_id: Option<String>,
+    pub relation_id: Option<String>,
+    pub reference_id: Option<String>,
 }
 
 impl IntegrityViolation {
-    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(code: IntegrityViolationCode, message: impl Into<String>) -> Self {
+        let msg = message.into();
         Self {
-            kind: kind.into(),
-            message: message.into(),
+            code,
+            kind: code.as_str().to_string(),
+            message: msg,
+            entity_id: None,
+            relation_id: None,
+            reference_id: None,
+        }
+    }
+
+    pub fn with_context(
+        code: IntegrityViolationCode,
+        message: impl Into<String>,
+        entity_id: Option<String>,
+        relation_id: Option<String>,
+        reference_id: Option<String>,
+    ) -> Self {
+        let msg = message.into();
+        Self {
+            code,
+            kind: code.as_str().to_string(),
+            message: msg,
+            entity_id,
+            relation_id,
+            reference_id,
         }
     }
 }
@@ -627,20 +693,79 @@ impl IntegrityViolation {
 pub struct IntegrityReport {
     pub valid: bool,
     pub violations: Vec<IntegrityViolation>,
+    pub checked_relations: usize,
+    pub checked_references: usize,
+    pub checked_assets: usize,
 }
 
 impl IntegrityReport {
-    pub fn ok() -> Self {
+    pub fn ok(checked_relations: usize, checked_references: usize, checked_assets: usize) -> Self {
         Self {
             valid: true,
             violations: Vec::new(),
+            checked_relations,
+            checked_references,
+            checked_assets,
         }
     }
 
-    pub fn with_violations(violations: Vec<IntegrityViolation>) -> Self {
+    pub fn with_violations(
+        violations: Vec<IntegrityViolation>,
+        checked_relations: usize,
+        checked_references: usize,
+        checked_assets: usize,
+    ) -> Self {
         let valid = violations.is_empty();
-        Self { valid, violations }
+        Self {
+            valid,
+            violations,
+            checked_relations,
+            checked_references,
+            checked_assets,
+        }
     }
+}
+
+/// Action kind for repair preview
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairActionKind {
+    DemoteDuplicatePrimary,
+    RemoveDuplicateRelation,
+    DetachInvalidAttachment,
+    RemoveSelfRelation,
+    InspectMissingEndpoint,
+    InspectMissingEntity,
+}
+
+impl RepairActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DemoteDuplicatePrimary => "demote_duplicate_primary",
+            Self::RemoveDuplicateRelation => "remove_duplicate_relation",
+            Self::DetachInvalidAttachment => "detach_invalid_attachment",
+            Self::RemoveSelfRelation => "remove_self_relation",
+            Self::InspectMissingEndpoint => "inspect_missing_endpoint",
+            Self::InspectMissingEntity => "inspect_missing_entity",
+        }
+    }
+}
+
+/// Individual action in an integrity repair plan
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrityRepairAction {
+    pub kind: RepairActionKind,
+    pub description: String,
+    pub target_id: String,
+    pub details: serde_json::Value,
+}
+
+/// Deterministic, read-only preview of repair actions for an integrity violation
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrityRepairPlan {
+    pub work_id: String,
+    pub safe: bool,
+    pub actions: Vec<IntegrityRepairAction>,
 }
 
 /// Architectural alias: A Work Profile represents the complete unified digital footprint for any medium.
