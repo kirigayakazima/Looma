@@ -976,6 +976,107 @@ impl RelationService for LoomaDb {
             .map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(rows > 0)
     }
+
+    fn relocate_work_directory(
+        &self,
+        work_id: &str,
+        old_asset_id: &str,
+        new_asset: &Asset,
+        new_relation: &Relation,
+    ) -> LoomaResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // 1. Validate work exists
+        let work_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM entities WHERE id = ?1",
+            params![work_id],
+            |r| r.get(0),
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        if work_count == 0 {
+            return Err(LoomaError::NotFound(format!("Work entity not found: {work_id}")));
+        }
+
+        // 2. Validate old asset exists
+        let old_asset_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM assets WHERE id = ?1",
+            params![old_asset_id],
+            |r| r.get(0),
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        if old_asset_count == 0 {
+            return Err(LoomaError::NotFound(format!("Old asset not found: {old_asset_id}")));
+        }
+
+        // 3. Validate old asset is linked to work
+        let rel_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM relations WHERE ((source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1))",
+            params![work_id, old_asset_id],
+            |r| r.get(0),
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        if rel_count == 0 {
+            return Err(LoomaError::Validation(format!(
+                "Old asset {old_asset_id} is not linked to work {work_id}"
+            )));
+        }
+
+        // 4. Upsert new Asset
+        let meta_str = serde_json::to_string(&new_asset.metadata).unwrap_or_else(|_| "{}".to_string());
+        tx.execute(
+            "INSERT INTO assets (id, kind, source, path, size, hash, mime_type, metadata_json, status, created_at, modified_at, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                 kind = excluded.kind,
+                 source = excluded.source,
+                 path = excluded.path,
+                 size = excluded.size,
+                 hash = excluded.hash,
+                 mime_type = excluded.mime_type,
+                 metadata_json = excluded.metadata_json,
+                 status = excluded.status,
+                 modified_at = excluded.modified_at,
+                 indexed_at = excluded.indexed_at",
+            params![
+                new_asset.id,
+                serde_json::to_string(&new_asset.kind).unwrap_or_default().trim_matches('"'),
+                serde_json::to_string(&new_asset.source).unwrap_or_default().trim_matches('"'),
+                new_asset.path,
+                new_asset.size.map(|s| s as i64),
+                new_asset.hash,
+                new_asset.mime_type,
+                meta_str,
+                serde_json::to_string(&new_asset.status).unwrap_or_default().trim_matches('"'),
+                new_asset.created_at.to_rfc3339(),
+                new_asset.modified_at.to_rfc3339(),
+                new_asset.indexed_at.to_rfc3339(),
+            ],
+        ).map_err(|e| LoomaError::Database(format!("Failed to upsert new asset: {e}")))?;
+
+        // 5. Delete old relation between work_id and old_asset_id
+        tx.execute(
+            "DELETE FROM relations WHERE (source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1)",
+            params![work_id, old_asset_id],
+        ).map_err(|e| LoomaError::Database(format!("Failed to delete old relation: {e}")))?;
+
+        // 6. Insert new relation between work_id and new_asset.id
+        let rel_meta_str = serde_json::to_string(&new_relation.metadata).unwrap_or_else(|_| "{}".to_string());
+        tx.execute(
+            "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                new_relation.id,
+                new_relation.source_id,
+                new_relation.source_type,
+                new_relation.relation_type,
+                new_relation.target_id,
+                new_relation.target_type,
+                rel_meta_str,
+                new_relation.created_at.to_rfc3339(),
+            ],
+        ).map_err(|e| LoomaError::Database(format!("Failed to insert new relation: {e}")))?;
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
 }
 
 impl MemoryService for LoomaDb {
@@ -1924,9 +2025,43 @@ impl ExternalReferenceService for LoomaDb {
     }
 
     fn create_external_reference(&self, reference: &ExternalReference) -> LoomaResult<()> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // If new reference is primary and has an entity_id, demote any existing primary for that entity
+        if reference.is_primary() {
+            if let Some(ref eid) = reference.entity_id {
+                let mut stmt = tx.prepare(
+                    "SELECT id, metadata_json FROM external_references WHERE entity_id = ?1"
+                ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+                let existing: Vec<(String, String)> = stmt.query_map(params![eid], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                }).map_err(|e| LoomaError::Database(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+                drop(stmt);
+
+                let now_str = Utc::now().to_rfc3339();
+                for (id, meta_str) in existing {
+                    let mut meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({}));
+                    if meta.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        if let Some(obj) = meta.as_object_mut() {
+                            obj.insert("is_primary".to_string(), serde_json::json!(false));
+                        }
+                        let new_meta_str = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
+                        tx.execute(
+                            "UPDATE external_references SET metadata_json = ?1, updated_at = ?2 WHERE id = ?3",
+                            params![new_meta_str, now_str, id],
+                        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+                    }
+                }
+            }
+        }
+
         let meta_str = serde_json::to_string(&reference.metadata).unwrap_or_else(|_| "{}".to_string());
-        conn.execute(
+        tx.execute(
             "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -1940,7 +2075,9 @@ impl ExternalReferenceService for LoomaDb {
                 reference.created_at.to_rfc3339(),
                 reference.updated_at.to_rfc3339(),
             ],
-        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        ).map_err(|e| LoomaError::Database(format!("Failed to insert external reference: {e}")))?;
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -1970,5 +2107,79 @@ impl ExternalReferenceService for LoomaDb {
         let count = conn.execute("DELETE FROM external_references WHERE id = ?1", params![id])
             .map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(count > 0)
+    }
+
+    fn set_primary_external_reference(&self, entity_id: &str, reference_id: &str) -> LoomaResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // 1. Validate entity exists
+        let entity_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM entities WHERE id = ?1",
+            params![entity_id],
+            |r| r.get(0),
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        if entity_count == 0 {
+            return Err(LoomaError::NotFound(format!("Entity not found: {entity_id}")));
+        }
+
+        // 2. Validate reference exists and belongs to entity
+        let mut ref_stmt = tx.prepare(
+            "SELECT entity_id, metadata_json FROM external_references WHERE id = ?1"
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let maybe_ref = ref_stmt.query_row(params![reference_id], |row| {
+            let eid: Option<String> = row.get(0)?;
+            let meta_str: String = row.get(1)?;
+            Ok((eid, meta_str))
+        }).optional().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        drop(ref_stmt);
+
+        let (owner_eid, _) = match maybe_ref {
+            Some(res) => res,
+            None => return Err(LoomaError::NotFound(format!("External reference not found: {reference_id}"))),
+        };
+
+        if owner_eid.as_deref() != Some(entity_id) {
+            return Err(LoomaError::Validation(format!(
+                "External reference {reference_id} does not belong to entity {entity_id}"
+            )));
+        }
+
+        // 3. Atomically update all references for entity_id:
+        // Set all to false, and set target to true
+        let mut list_stmt = tx.prepare(
+            "SELECT id, metadata_json FROM external_references WHERE entity_id = ?1"
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let refs_to_update: Vec<(String, String)> = list_stmt.query_map(params![entity_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        }).map_err(|e| LoomaError::Database(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+        drop(list_stmt);
+
+        let now_str = Utc::now().to_rfc3339();
+        for (id, meta_str) in refs_to_update {
+            let mut meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({}));
+            let should_be_primary = id == reference_id;
+            let current_is_primary = meta.get("is_primary").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            if current_is_primary != should_be_primary || id == reference_id {
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.insert("is_primary".to_string(), serde_json::json!(should_be_primary));
+                }
+                let new_meta_str = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
+                tx.execute(
+                    "UPDATE external_references SET metadata_json = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![new_meta_str, now_str, id],
+                ).map_err(|e| LoomaError::Database(e.to_string()))?;
+            }
+        }
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
     }
 }

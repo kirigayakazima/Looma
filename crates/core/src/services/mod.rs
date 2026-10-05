@@ -40,6 +40,7 @@ pub trait RelationService: Send + Sync {
     fn create_relation(&self, relation: &Relation) -> LoomaResult<()>;
     fn delete_relation(&self, id: &str) -> LoomaResult<bool>;
     fn delete_relation_between(&self, source_id: &str, target_id: &str) -> LoomaResult<bool>;
+    fn relocate_work_directory(&self, work_id: &str, old_asset_id: &str, new_asset: &Asset, new_relation: &Relation) -> LoomaResult<()>;
 }
 
 pub trait MemoryService: Send + Sync {
@@ -83,5 +84,6 @@ pub trait ExternalReferenceService: Send + Sync {
     fn create_external_reference(&self, reference: &crate::models::ExternalReference) -> LoomaResult<()>;
     fn update_external_reference(&self, reference: &crate::models::ExternalReference) -> LoomaResult<()>;
     fn delete_external_reference(&self, id: &str) -> LoomaResult<bool>;
+    fn set_primary_external_reference(&self, entity_id: &str, reference_id: &str) -> LoomaResult<()>;
 }
 

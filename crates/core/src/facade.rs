@@ -420,22 +420,24 @@ impl LoomaCore {
         entity_id: &str,
         reference_id: &str,
     ) -> LoomaResult<Vec<ExternalReference>> {
-        let refs = self.list_external_references(Some(entity_id))?;
-        if !refs.iter().any(|r| r.id == reference_id) {
-            return Err(LoomaError::NotFound(format!(
-                "External reference {reference_id} not found for entity {entity_id}"
+        // Pre-validation 1: Entity exists
+        if self.get_entity(entity_id)?.is_none() {
+            return Err(LoomaError::NotFound(format!("Entity not found: {entity_id}")));
+        }
+
+        // Pre-validation 2: Reference exists and belongs to entity
+        let r = self.get_external_reference(reference_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("External reference not found: {reference_id}")))?;
+        if r.entity_id.as_deref() != Some(entity_id) {
+            return Err(LoomaError::Validation(format!(
+                "External reference {reference_id} does not belong to entity {entity_id}"
             )));
         }
 
-        let mut updated = Vec::new();
-        for mut r in refs {
-            let should_be_primary = r.id == reference_id;
-            if r.is_primary() != should_be_primary {
-                r.set_primary(should_be_primary);
-                self.update_external_reference(actor, &r)?;
-            }
-            updated.push(r);
-        }
+        // Execute atomic transaction in repository
+        self.repo.set_primary_external_reference(entity_id, reference_id)?;
+
+        let updated = self.list_external_references(Some(entity_id))?;
 
         self.record_audit(
             actor,
@@ -445,6 +447,13 @@ impl LoomaCore {
             "success",
             json!({ "primary_reference_id": reference_id }),
         )?;
+
+        self.emit_event(
+            actor,
+            DomainEvent::EntityUpdated {
+                id: entity_id.to_string(),
+            },
+        );
 
         Ok(updated)
     }
@@ -511,6 +520,64 @@ impl LoomaCore {
                             .unwrap_or(RecordStatus::Unknown)
                     });
                     if e_st != parsed_st {
+                        return false;
+                    }
+                }
+
+                true
+            })
+            .collect();
+        Ok(filtered)
+    }
+
+    /// Search works with broad SQLite filtering followed by strict Rust semantic verification (title, description, original_title, aliases)
+    pub fn search_works(
+        &self,
+        work_type: Option<&str>,
+        status: Option<&str>,
+        query: Option<&str>,
+    ) -> LoomaResult<Vec<Entity>> {
+        let mut filter = EntityFilter::default();
+        if let Some(q) = query {
+            let trimmed = q.trim();
+            if !trimmed.is_empty() {
+                filter.search_query = Some(trimmed.to_string());
+            }
+        }
+        let candidates = self.list_entities(&filter)?;
+        let filtered = candidates
+            .into_iter()
+            .filter(|e| {
+                let meta = e.as_work_metadata();
+                if meta.is_none() && e.entity_type != "work" && e.properties.get("domain").and_then(|v| v.as_str()) != Some("work") {
+                    if WorkType::parse(&e.entity_type) == WorkType::Other && e.entity_type != "other" {
+                        return false;
+                    }
+                }
+
+                if let Some(wt) = work_type {
+                    let parsed = WorkType::parse(wt);
+                    let e_type = meta.as_ref().map(|m| m.work_type).unwrap_or_else(|| WorkType::parse(&e.entity_type));
+                    if e_type != parsed && e.entity_type != wt {
+                        return false;
+                    }
+                }
+
+                if let Some(st) = status {
+                    let parsed_st = RecordStatus::parse(st);
+                    let e_st = meta.as_ref().map(|m| m.status).unwrap_or_else(|| {
+                        e.properties.get("status")
+                            .and_then(|v| v.as_str())
+                            .map(RecordStatus::parse)
+                            .unwrap_or(RecordStatus::Unknown)
+                    });
+                    if e_st != parsed_st {
+                        return false;
+                    }
+                }
+
+                if let Some(q) = query {
+                    if !e.matches_query(q) {
                         return false;
                     }
                 }
@@ -715,9 +782,98 @@ impl LoomaCore {
         old_asset_id: &str,
         new_dir_path: &str,
     ) -> LoomaResult<(Asset, Relation)> {
-        let (new_asset, new_rel) = self.link_work_directory(actor, work_id, new_dir_path)?;
-        let _ = self.delete_relation_between(actor, work_id, old_asset_id);
-        let _ = self.delete_relation_between(actor, old_asset_id, work_id);
+        // Pre-validation 1: Work entity must exist
+        if self.get_entity(work_id)?.is_none() {
+            return Err(LoomaError::NotFound(format!("Work entity not found: {work_id}")));
+        }
+
+        // Pre-validation 2: Old asset must exist
+        let old_asset = self.get_asset(old_asset_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Old asset not found: {old_asset_id}")))?;
+
+        // Pre-validation 3: Old asset must be linked to work
+        let existing_relations = self.list_relations_for_item(work_id)?;
+        let old_rel = existing_relations.iter().find(|r| {
+            (r.source_id == work_id && r.target_id == old_asset_id)
+                || (r.source_id == old_asset_id && r.target_id == work_id)
+        }).ok_or_else(|| LoomaError::Validation(format!(
+            "Old asset {old_asset_id} is not linked to work {work_id}"
+        )))?;
+
+        // Pre-validation 4: Validate new path exists on disk and is a directory
+        let norm_path = normalize_directory_path(new_dir_path);
+        if norm_path.is_empty() {
+            return Err(LoomaError::Validation("Directory path cannot be empty".to_string()));
+        }
+        let p = Path::new(&norm_path);
+        if !p.exists() {
+            return Err(LoomaError::Validation(format!(
+                "Directory path does not exist: {norm_path}"
+            )));
+        }
+        if !p.is_dir() {
+            return Err(LoomaError::Validation(format!(
+                "Path is not a directory: {norm_path}"
+            )));
+        }
+
+        // Case E: New path and old path are identical -> Idempotent success!
+        if let Some(ref old_path) = old_asset.path {
+            if normalize_directory_path(old_path) == norm_path {
+                return Ok((old_asset, old_rel.clone()));
+            }
+        }
+
+        // Prepare new asset (reuse if path already in DB, or create new)
+        let new_asset = if let Some(existing) = self.get_asset_by_path(&norm_path)? {
+            existing
+        } else {
+            let dir_name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| norm_path.clone());
+
+            let drive = if norm_path.len() >= 2 && &norm_path[1..2] == ":" {
+                norm_path[0..2].to_uppercase()
+            } else {
+                "Local".to_string()
+            };
+
+            let now = Utc::now();
+            Asset {
+                id: Uuid::new_v4().to_string(),
+                kind: AssetKind::Directory,
+                source: AssetSource::Local,
+                path: Some(norm_path.clone()),
+                size: None,
+                hash: None,
+                mime_type: Some("inode/directory".to_string()),
+                metadata: json!({
+                    "directory_name": dir_name,
+                    "drive": drive,
+                }),
+                status: AssetStatus::Active,
+                created_at: now,
+                modified_at: now,
+                indexed_at: now,
+            }
+        };
+
+        // Prepare new relation
+        let new_rel = Relation {
+            id: format!("rel_{}", &Uuid::new_v4().to_string()[..8]),
+            source_id: work_id.to_string(),
+            source_type: "entity".to_string(),
+            relation_type: relation_types::ATTACHES.to_string(),
+            target_id: new_asset.id.clone(),
+            target_type: "asset".to_string(),
+            metadata: json!({ "domain": "personal_records" }),
+            created_at: Utc::now(),
+        };
+
+        // Atomically relocate in DB (single transaction: upsert new asset, delete old relation, insert new relation)
+        self.repo.relocate_work_directory(work_id, old_asset_id, &new_asset, &new_rel)?;
+
         self.record_audit(
             actor,
             "work.relocate_directory",
@@ -730,6 +886,16 @@ impl LoomaCore {
                 "new_path": new_asset.path,
             }),
         )?;
+
+        self.emit_event(
+            actor,
+            DomainEvent::RelationCreated {
+                id: new_rel.id.clone(),
+                source_id: work_id.to_string(),
+                target_id: new_asset.id.clone(),
+            },
+        );
+
         Ok((new_asset, new_rel))
     }
 
@@ -792,7 +958,57 @@ impl LoomaCore {
         self.repo.list_relations_for_target(target_id)
     }
 
+    fn check_item_exists(&self, item_id: &str, item_type: &str) -> LoomaResult<bool> {
+        match item_type {
+            "entity" => Ok(self.repo.get_entity_by_id(item_id)?.is_some()),
+            "asset" => Ok(self.repo.get_asset_by_id(item_id)?.is_some()),
+            "memory" => Ok(self.repo.get_memory_by_id(item_id)?.is_some()),
+            _ => {
+                if self.repo.get_entity_by_id(item_id)?.is_some() {
+                    return Ok(true);
+                }
+                if self.repo.get_asset_by_id(item_id)?.is_some() {
+                    return Ok(true);
+                }
+                if self.repo.get_memory_by_id(item_id)?.is_some() {
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+        }
+    }
+
     pub fn create_relation(&self, actor: &str, relation: &Relation) -> LoomaResult<()> {
+        // P1 Integrity Check 1: Self relation is rejected
+        if relation.source_id == relation.target_id {
+            return Err(LoomaError::Validation(format!(
+                "Self-relation is not allowed: source_id and target_id are both '{}'",
+                relation.source_id
+            )));
+        }
+
+        // P1 Integrity Check 2: Relation source must exist
+        if !self.check_item_exists(&relation.source_id, &relation.source_type)? {
+            return Err(LoomaError::NotFound(format!(
+                "Relation source {} '{}' not found",
+                relation.source_type, relation.source_id
+            )));
+        }
+
+        // P1 Integrity Check 3: Relation target must exist
+        if !self.check_item_exists(&relation.target_id, &relation.target_type)? {
+            return Err(LoomaError::NotFound(format!(
+                "Relation target {} '{}' not found",
+                relation.target_type, relation.target_id
+            )));
+        }
+
+        // P1 Integrity Check 4: Duplicate relation protection (idempotent success)
+        let existing = self.repo.list_relations_for_source(&relation.source_id)?;
+        if existing.iter().any(|r| r.relation_type == relation.relation_type && r.target_id == relation.target_id) {
+            return Ok(());
+        }
+
         self.repo.create_relation(relation)?;
         self.record_audit(
             actor,

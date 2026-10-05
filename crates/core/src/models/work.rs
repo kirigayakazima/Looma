@@ -18,6 +18,7 @@ pub enum WorkType {
     Book,
     Novel,
     Documentary,
+    #[serde(other)]
     Other,
 }
 
@@ -71,6 +72,7 @@ pub enum RecordStatus {
     Dropped,
     Revisit,
     Archived,
+    #[serde(other)]
     Unknown,
 }
 
@@ -479,25 +481,54 @@ impl Entity {
         self
     }
 
-    /// Set or update aliases on work metadata and properties
+    /// Set or update aliases on work metadata and properties (trimmed, deduplicated case-insensitively)
     pub fn set_aliases(&mut self, aliases: Vec<String>) {
+        let mut seen = std::collections::HashSet::new();
+        let mut clean_aliases = Vec::new();
+        for a in aliases {
+            let trimmed = a.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_lowercase();
+            if seen.insert(lower) {
+                clean_aliases.push(trimmed.to_string());
+            }
+        }
+
         if let Some(obj) = self.properties.as_object_mut() {
             if let Some(work_val) = obj.get_mut("work") {
                 if let Some(work_obj) = work_val.as_object_mut() {
-                    if aliases.is_empty() {
+                    if clean_aliases.is_empty() {
                         work_obj.remove("aliases");
                     } else {
-                        work_obj.insert("aliases".to_string(), json!(aliases));
+                        work_obj.insert("aliases".to_string(), json!(clean_aliases));
                     }
                 }
             }
-            if aliases.is_empty() {
+            if clean_aliases.is_empty() {
                 obj.remove("aliases");
             } else {
-                obj.insert("aliases".to_string(), json!(aliases));
+                obj.insert("aliases".to_string(), json!(clean_aliases));
             }
             self.updated_at = Utc::now();
         }
+    }
+
+    /// Check if this work matches an alias query specifically
+    pub fn matches_alias(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return false;
+        }
+        if let Some(meta) = self.as_work_metadata() {
+            for alias in &meta.aliases {
+                if alias.to_lowercase().contains(&q) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Match entity against a search query across title, description, original_title, and aliases
