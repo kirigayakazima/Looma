@@ -146,7 +146,7 @@ impl ExperienceEntry {
     pub fn new(subject_id: impl Into<String>, event_type: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
-            id: format!("exp_{}", &Uuid::new_v4().to_string()[..8]),
+            id: format!("exp_{}", Uuid::new_v4().simple()),
             subject_type: "entity".to_string(),
             subject_id: subject_id.into(),
             event_type: event_type.into(),

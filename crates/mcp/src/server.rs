@@ -1,5 +1,6 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -28,6 +29,7 @@ pub struct McpServer {
 
 impl McpServer {
     pub fn new(core: LoomaCore) -> Self {
+        let core = core.with_scan_engine(Arc::new(Scanner));
         Self {
             core,
             permission: McpPermissionLevel::ReadOnly,
@@ -35,6 +37,7 @@ impl McpServer {
     }
 
     pub fn with_permission(core: LoomaCore, permission: McpPermissionLevel) -> Self {
+        let core = core.with_scan_engine(Arc::new(Scanner));
         Self { core, permission }
     }
 
@@ -75,6 +78,14 @@ impl McpServer {
         }
 
         Ok(())
+    }
+
+    pub fn handle_json_str(&self, json_str: &str) -> Option<Value> {
+        let request: Value = serde_json::from_str(json_str).ok()?;
+        let id = request.get("id").cloned();
+        let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        self.handle_method(method, params, id)
     }
 
     pub fn handle_method(&self, method: &str, params: Value, id: Option<Value>) -> Option<Value> {
@@ -1204,11 +1215,10 @@ impl McpServer {
                     compute_hash,
                     ..Default::default()
                 };
-                let summary = Scanner::scan_directory(
-                    &self.core,
+                let summary = self.core.scan_directory(
                     &PathBuf::from(path_str),
-                    &options,
-                    None::<fn(looma_scanner::ScanProgress)>,
+                    Some(options),
+                    None::<fn(looma_core::models::ScanProgress)>,
                 )
                 .map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())

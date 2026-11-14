@@ -404,15 +404,36 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                       <div className="relative border-l border-neutral-800/80 ml-1 pl-6 space-y-3">
                         {groupedTimeline[year][month].map((item) => {
                           const dateObj = new Date(item.timestamp);
-                          const dateDisplay = isNaN(dateObj.getTime())
-                            ? ''
-                            : `${dateObj.getDate()}日 ${dateObj
-                                .getHours()
-                                .toString()
-                                .padStart(2, '0')}:${dateObj
-                                .getMinutes()
-                                .toString()
-                                .padStart(2, '0')}`;
+                          let dateDisplay = '';
+                          if (item.item_type === 'experience') {
+                            const prec = item.metadata?.occurred_precision;
+                            const val = item.metadata?.occurred_value;
+                            if (prec === 'unknown' || item.metadata?.is_occurred_time_unknown) {
+                              const createdRaw = item.metadata?.created_at;
+                              const createdStr = typeof createdRaw === 'string' ? new Date(createdRaw).toLocaleDateString() : '';
+                              dateDisplay = createdStr ? `时间未指定 (记录于 ${createdStr})` : '时间未指定';
+                            } else if (prec === 'year') {
+                              dateDisplay = `发生于 ${val ? String(val) : year} 年`;
+                            } else if (prec === 'month') {
+                              dateDisplay = `发生于 ${val ? String(val) : `${year}-${month}`}`;
+                            } else if (prec === 'day') {
+                              dateDisplay = `发生于 ${val ? String(val) : ''}`;
+                            } else {
+                              dateDisplay = isNaN(dateObj.getTime())
+                                ? ''
+                                : `${dateObj.getDate()}日 ${dateObj.getHours().toString().padStart(2, '0')}:${dateObj.getMinutes().toString().padStart(2, '0')}`;
+                            }
+                          } else {
+                            dateDisplay = isNaN(dateObj.getTime())
+                              ? ''
+                              : `${dateObj.getDate()}日 ${dateObj
+                                  .getHours()
+                                  .toString()
+                                  .padStart(2, '0')}:${dateObj
+                                  .getMinutes()
+                                  .toString()
+                                  .padStart(2, '0')}`;
+                          }
 
                           return (
                             <div
@@ -479,7 +500,15 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                   <div className="flex items-center space-x-2 mt-0.5">
                     {getItemTypeBadge(activeItem)}
                     <span className="text-[10px] text-neutral-500 font-mono">
-                      {new Date(activeItem.timestamp).toLocaleString()}
+                      {activeItem.item_type === 'experience' && (activeItem.metadata?.occurred_precision === 'unknown' || activeItem.metadata?.is_occurred_time_unknown)
+                        ? `时间未指定 (记录于 ${typeof activeItem.metadata?.created_at === 'string' ? new Date(activeItem.metadata.created_at).toLocaleString() : new Date(activeItem.timestamp).toLocaleString()})`
+                        : activeItem.item_type === 'experience' && activeItem.metadata?.occurred_precision === 'year'
+                        ? `发生于 ${String(activeItem.metadata?.occurred_value || '')} 年`
+                        : activeItem.item_type === 'experience' && activeItem.metadata?.occurred_precision === 'month'
+                        ? `发生于 ${String(activeItem.metadata?.occurred_value || '')}`
+                        : activeItem.item_type === 'experience' && activeItem.metadata?.occurred_precision === 'day'
+                        ? `发生于 ${String(activeItem.metadata?.occurred_value || '')}`
+                        : new Date(activeItem.timestamp).toLocaleString()}
                     </span>
                   </div>
                 </div>
@@ -510,14 +539,32 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                   <MarkdownRenderer content={activeItem.description} />
                 </div>
               ) : activeItem.item_type === 'experience' ? (
-                <div className="space-y-2">
+                <div className="space-y-3">
                   <div className="flex items-center gap-2">
                     <span className="px-2 py-0.5 rounded text-xs bg-emerald-500/10 text-emerald-400 font-medium border border-emerald-500/20">
-                      {activeItem.badge || 'Footprint'}
+                      {activeItem.badge ? `足迹 · ${activeItem.badge}` : '足迹'}
                     </span>
-                    <span className="text-xs text-neutral-400 font-mono">
-                      {activeItem.timestamp.substring(0, 10)}
-                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs p-3 rounded-lg bg-neutral-950/60 border border-neutral-800/80">
+                    <div>
+                      <span className="text-neutral-500">实际发生：</span>
+                      <span className="text-neutral-200 font-mono ml-1">
+                        {activeItem.metadata?.occurred_precision === 'unknown' || activeItem.metadata?.is_occurred_time_unknown
+                          ? '未指定具体时间'
+                          : activeItem.metadata?.occurred_precision === 'year'
+                          ? `${String(activeItem.metadata?.occurred_value || '')} 年`
+                          : activeItem.metadata?.occurred_value ? String(activeItem.metadata.occurred_value) : '—'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-neutral-500">记录时间：</span>
+                      <span className="text-neutral-200 font-mono ml-1">
+                        {typeof activeItem.metadata?.created_at === 'string'
+                          ? new Date(activeItem.metadata.created_at).toLocaleString()
+                          : new Date(activeItem.timestamp).toLocaleString()}
+                      </span>
+                    </div>
                   </div>
                   {activeItem.description && (
                     <div className="p-3 rounded-lg bg-neutral-950/60 border border-neutral-800/80">
