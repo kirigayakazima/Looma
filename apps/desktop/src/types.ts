@@ -125,7 +125,7 @@ export interface CollectionItem {
 
 export interface TimelineItem {
   id: string;
-  item_type: 'asset' | 'entity' | 'memory';
+  item_type: 'asset' | 'entity' | 'memory' | 'experience';
   timestamp: string;
   title: string;
   description: string | null;
@@ -264,6 +264,29 @@ export interface WorkMetadata {
   type_metadata?: Record<string, unknown> | null;
 }
 
+export interface ExperienceEntry {
+  id: string;
+  subject_type: string;
+  subject_id: string;
+  event_type: string;
+  title?: string | null;
+  note?: string | null;
+  occurred_value?: string | null;
+  occurred_precision: 'unknown' | 'year' | 'month' | 'day' | 'instant';
+  context_json: Record<string, unknown>;
+  visibility: 'normal' | 'archived';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExperienceLink {
+  experience_id: string;
+  linked_type: 'asset' | 'memory' | 'external_reference';
+  linked_id: string;
+  relation_type: string;
+  position: number;
+}
+
 export interface WorkSummary {
   entity: Entity;
   work_metadata: WorkMetadata | null;
@@ -272,5 +295,6 @@ export interface WorkSummary {
   linked_memories: Memory[];
   linked_collections: Collection[];
   external_references: ExternalReference[];
+  experiences: ExperienceEntry[];
 }
 

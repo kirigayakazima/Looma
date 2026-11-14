@@ -19,6 +19,16 @@ pub enum DomainEvent {
     RelationDeleted { id: String },
     ExternalReferenceCreated { id: String, url: String },
     ExternalReferenceDeleted { id: String },
+    ExperienceCreated { id: String, subject_id: String, event_type: String },
+    ExperienceUpdated { id: String },
+    ExperienceArchived { id: String },
+    SourceRootCreated { id: String, path: String },
+    SourceRootUpdated { id: String },
+    SourceRootRebound { id: String, old_path: String, new_path: String },
+    AssetArchived { id: String },
+    AssetUnarchived { id: String },
+    AssetUntracked { id: String, reason: Option<String> },
+    AssetTrackingResumed { id: String },
     BackupCompleted { path: String, duration_ms: u64 },
 }
 

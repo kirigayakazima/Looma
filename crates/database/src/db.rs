@@ -1668,6 +1668,129 @@ impl TimelineService for LoomaDb {
             }
         }
 
+        if include_all || types.iter().any(|t| t == "experience") {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT e.id, 'experience', e.created_at, e.occurred_value, e.occurred_precision, e.event_type, e.title, ent.title, e.note, e.context_json, e.subject_id
+                     FROM experience_entries e
+                     LEFT JOIN entities ent ON e.subject_id = ent.id
+                     WHERE e.visibility = 'normal'",
+                )
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let exp_iter = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let item_type: String = row.get(1)?;
+                    let created_str: String = row.get(2)?;
+                    let occurred_value: Option<String> = row.get(3)?;
+                    let occurred_precision: String = row.get(4)?;
+                    let event_type: String = row.get(5)?;
+                    let exp_title: Option<String> = row.get(6)?;
+                    let ent_title: Option<String> = row.get(7)?;
+                    let note: Option<String> = row.get(8)?;
+                    let ctx_str: String = row.get(9)?;
+                    let subject_id: String = row.get(10)?;
+                    Ok((
+                        id,
+                        item_type,
+                        created_str,
+                        occurred_value,
+                        occurred_precision,
+                        event_type,
+                        exp_title,
+                        ent_title,
+                        note,
+                        ctx_str,
+                        subject_id,
+                    ))
+                })
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for row in exp_iter {
+                let (
+                    id,
+                    item_type,
+                    created_str,
+                    occurred_val,
+                    precision,
+                    event_type,
+                    exp_title,
+                    ent_title,
+                    note,
+                    ctx_str,
+                    subject_id,
+                ) = row.map_err(|e| LoomaError::Database(e.to_string()))?;
+
+                let created_dt = DateTime::parse_from_rfc3339(&created_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                let timestamp = match precision.as_str() {
+                    "instant" => occurred_val
+                        .as_deref()
+                        .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
+                        .map(|d| d.with_timezone(&Utc))
+                        .unwrap_or(created_dt),
+                    "day" => occurred_val
+                        .as_deref()
+                        .and_then(|v| chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok())
+                        .and_then(|d| d.and_hms_opt(0, 0, 0))
+                        .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
+                        .unwrap_or(created_dt),
+                    "month" => occurred_val
+                        .as_deref()
+                        .and_then(|v| {
+                            let parts: Vec<&str> = v.split('-').collect();
+                            if parts.len() == 2 {
+                                let y: i32 = parts[0].parse().ok()?;
+                                let m: u32 = parts[1].parse().ok()?;
+                                chrono::NaiveDate::from_ymd_opt(y, m, 1)
+                            } else {
+                                None
+                            }
+                        })
+                        .and_then(|d| d.and_hms_opt(0, 0, 0))
+                        .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
+                        .unwrap_or(created_dt),
+                    "year" => occurred_val
+                        .as_deref()
+                        .and_then(|v| {
+                            let y: i32 = v.parse().ok()?;
+                            chrono::NaiveDate::from_ymd_opt(y, 1, 1)
+                        })
+                        .and_then(|d| d.and_hms_opt(0, 0, 0))
+                        .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
+                        .unwrap_or(created_dt),
+                    _ => created_dt,
+                };
+
+                let target_name = ent_title.unwrap_or_else(|| "Unknown".to_string());
+                let title = exp_title.unwrap_or_else(|| format!("{}: {}", target_name, event_type));
+                let badge = Some(event_type.clone());
+                let context: Value = serde_json::from_str(&ctx_str).unwrap_or(Value::Object(Default::default()));
+
+                let metadata = serde_json::json!({
+                    "subject_id": subject_id,
+                    "subject_title": target_name,
+                    "event_type": event_type,
+                    "occurred_precision": precision,
+                    "occurred_value": occurred_val,
+                    "context": context,
+                });
+
+                items.push(TimelineItem {
+                    id,
+                    item_type,
+                    timestamp,
+                    title,
+                    description: note,
+                    badge,
+                    metadata,
+                });
+            }
+        }
+
         // Sort chronologically descending
         items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
@@ -1698,6 +1821,9 @@ impl BackupService for LoomaDb {
         let memories = self.list_memories(100000, 0)?;
         let collections = self.list_collections()?;
         let ext_refs = self.list_external_references(None).unwrap_or_default();
+        let experiences_count = self.count_experiences().unwrap_or(0) as usize;
+        let roots = self.list_source_roots().unwrap_or_default();
+        let suppressions = self.list_suppressions(None).unwrap_or_default();
 
         let conn = self.conn.lock();
         let relations_count: i64 = conn
@@ -1726,6 +1852,9 @@ impl BackupService for LoomaDb {
             collections_count: collections.len(),
             relations_count: relations_count as usize,
             external_references_count: ext_refs.len(),
+            experiences_count,
+            source_roots_count: roots.len(),
+            asset_suppressions_count: suppressions.len(),
             checksums,
         })
     }
@@ -1747,6 +1876,13 @@ impl BackupService for LoomaDb {
         let memories = self.list_memories(100000, 0)?;
         let collections = self.list_collections()?;
         let external_references = self.list_external_references(None).unwrap_or_default();
+        let experiences = self.list_experiences(&ExperienceFilter::default()).unwrap_or_default();
+        let mut experience_links = Vec::new();
+        for exp in &experiences {
+            if let Ok(links) = self.list_experience_links(&exp.id) {
+                experience_links.extend(links);
+            }
+        }
 
         let mut relations = Vec::new();
         {
@@ -1789,6 +1925,39 @@ impl BackupService for LoomaDb {
         }
 
         // 2. Write vault_dump.json
+        let source_roots = self.list_source_roots().unwrap_or_default();
+        let asset_suppressions = self.list_suppressions(None).unwrap_or_default();
+        let mut asset_lifecycles = Vec::new();
+        {
+            let conn = self.conn.lock();
+            let stmt_res = conn.prepare(
+                "SELECT asset_id, root_id, relative_path, availability, visibility, tracking, last_verified_at, untracked_at, untracked_reason
+                 FROM asset_lifecycle"
+            );
+            if let Ok(mut stmt) = stmt_res {
+                let rows = stmt.query_map([], |row| {
+                    let last_verified_str: Option<String> = row.get(6)?;
+                    let untracked_str: Option<String> = row.get(7)?;
+                    Ok(AssetLifecycle {
+                        asset_id: row.get(0)?,
+                        root_id: row.get(1)?,
+                        relative_path: row.get(2)?,
+                        availability: row.get(3)?,
+                        visibility: row.get(4)?,
+                        tracking: row.get(5)?,
+                        last_verified_at: last_verified_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                        untracked_at: untracked_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                        untracked_reason: row.get(8)?,
+                    })
+                });
+                if let Ok(mapped) = rows {
+                    for r in mapped.flatten() {
+                        asset_lifecycles.push(r);
+                    }
+                }
+            }
+        }
+
         let dump = VaultExportDump {
             manifest: manifest.clone(),
             assets,
@@ -1797,6 +1966,11 @@ impl BackupService for LoomaDb {
             collections,
             relations,
             external_references,
+            experiences,
+            experience_links,
+            source_roots,
+            asset_lifecycles,
+            asset_suppressions,
         };
         let dump_bytes = serde_json::to_vec_pretty(&dump)
             .map_err(LoomaError::Serialization)?;
@@ -1883,6 +2057,7 @@ impl BackupService for LoomaDb {
         let mut restored_collections = 0;
         let mut restored_relations = 0;
         let mut restored_external_references = 0;
+        let mut restored_experiences = 0;
 
         for asset in dump.assets {
             self.upsert_asset(&asset)?;
@@ -1928,6 +2103,37 @@ impl BackupService for LoomaDb {
             restored_external_references += 1;
         }
 
+        for exp in dump.experiences {
+            if self.get_experience_by_id(&exp.id)?.is_some() {
+                let _ = self.update_experience(&exp);
+            } else {
+                let _ = self.create_experience(&exp, &[], None);
+            }
+            restored_experiences += 1;
+        }
+
+        for link in dump.experience_links {
+            let _ = self.add_experience_link(&link);
+        }
+
+        let mut restored_source_roots = 0;
+        for root in dump.source_roots {
+            if self.get_source_root(&root.id)?.is_none() {
+                let _ = self.create_source_root(&root);
+                restored_source_roots += 1;
+            }
+        }
+
+        for lc in dump.asset_lifecycles {
+            let _ = self.set_asset_lifecycle(&lc);
+        }
+
+        let mut restored_asset_suppressions = 0;
+        for sup in dump.asset_suppressions {
+            let _ = self.add_suppression(&sup.root_id, &sup.relative_path, sup.reason.as_deref());
+            restored_asset_suppressions += 1;
+        }
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(RestoreResult {
@@ -1937,11 +2143,23 @@ impl BackupService for LoomaDb {
             restored_collections,
             restored_relations,
             restored_external_references,
+            restored_experiences,
+            restored_source_roots,
+            restored_asset_suppressions,
             duration_ms,
         })
     }
 
     fn doctor_inspect(&self) -> LoomaResult<VaultDoctorReport> {
+        let roots = self.list_source_roots().unwrap_or_default();
+        let mut offline_root_prefixes = Vec::new();
+        for root in &roots {
+            let p = Path::new(&root.path);
+            if !p.exists() || !p.is_dir() {
+                offline_root_prefixes.push(root.path.trim_end_matches('/').trim_end_matches('\\').to_string());
+            }
+        }
+
         let assets = self.query_assets(&AssetFilter::default())?;
         let total_assets = assets.len();
         let mut active_assets = 0;
@@ -1949,7 +2167,16 @@ impl BackupService for LoomaDb {
 
         for asset in assets {
             if let Some(ref p) = asset.path {
+                let norm_p = p.replace('\\', "/");
+                let is_under_offline_root = offline_root_prefixes.iter().any(|prefix| {
+                    let norm_prefix = prefix.replace('\\', "/");
+                    norm_p.starts_with(&norm_prefix)
+                });
+
                 if Path::new(p).exists() {
+                    active_assets += 1;
+                } else if is_under_offline_root {
+                    // Drive or root is offline; do NOT treat as missing per Section 9.4 and T09!
                     active_assets += 1;
                 } else {
                     missing_assets.push(p.clone());
@@ -2314,6 +2541,1260 @@ impl ExternalReferenceService for LoomaDb {
         }
 
         tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+}
+
+impl ExperienceService for LoomaDb {
+    fn create_experience(
+        &self,
+        entry: &ExperienceEntry,
+        links: &[ExperienceLink],
+        request_id: Option<(&str, &str)>,
+    ) -> LoomaResult<ExperienceEntry> {
+        let mut conn = self.conn.lock();
+
+        // 1. Check idempotency request_id
+        if let Some((scope, req_id)) = request_id {
+            let existing_id: Option<String> = conn
+                .query_row(
+                    "SELECT experience_id FROM experience_request_ids WHERE actor_scope = ?1 AND request_id = ?2",
+                    params![scope, req_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            if let Some(exp_id) = existing_id {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, subject_type, subject_id, event_type, title, note, occurred_value, occurred_precision, context_json, visibility, created_at, updated_at
+                         FROM experience_entries WHERE id = ?1",
+                    )
+                    .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+                let existing = stmt
+                    .query_row(params![exp_id], |row| {
+                        let id: String = row.get(0)?;
+                        let subject_type: String = row.get(1)?;
+                        let subject_id: String = row.get(2)?;
+                        let event_type: String = row.get(3)?;
+                        let title: Option<String> = row.get(4)?;
+                        let note: Option<String> = row.get(5)?;
+                        let occurred_value: Option<String> = row.get(6)?;
+                        let occurred_precision: String = row.get(7)?;
+                        let ctx_str: String = row.get(8)?;
+                        let visibility: String = row.get(9)?;
+                        let c_str: String = row.get(10)?;
+                        let u_str: String = row.get(11)?;
+
+                        let context_json = serde_json::from_str(&ctx_str).unwrap_or(Value::Object(Default::default()));
+                        let created_at = DateTime::parse_from_rfc3339(&c_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+                        let updated_at = DateTime::parse_from_rfc3339(&u_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+
+                        Ok(ExperienceEntry {
+                            id,
+                            subject_type,
+                            subject_id,
+                            event_type,
+                            title,
+                            note,
+                            occurred_value,
+                            occurred_precision,
+                            context_json,
+                            visibility,
+                            created_at,
+                            updated_at,
+                        })
+                    })
+                    .optional()
+                    .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+                if let Some(exp) = existing {
+                    return Ok(exp);
+                }
+            }
+        }
+
+        // 2. Insert into experience_entries and links in transaction
+        let tx = conn
+            .transaction()
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let ctx_str = serde_json::to_string(&entry.context_json).unwrap_or_else(|_| "{}".to_string());
+        let c_str = entry.created_at.to_rfc3339();
+        let u_str = entry.updated_at.to_rfc3339();
+
+        tx.execute(
+            "INSERT INTO experience_entries (id, subject_type, subject_id, event_type, title, note, occurred_value, occurred_precision, context_json, visibility, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                entry.id,
+                entry.subject_type,
+                entry.subject_id,
+                entry.event_type,
+                entry.title,
+                entry.note,
+                entry.occurred_value,
+                entry.occurred_precision,
+                ctx_str,
+                entry.visibility,
+                c_str,
+                u_str,
+            ],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        for link in links {
+            tx.execute(
+                "INSERT OR REPLACE INTO experience_links (experience_id, linked_type, linked_id, relation_type, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    link.experience_id,
+                    link.linked_type,
+                    link.linked_id,
+                    link.relation_type,
+                    link.position,
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        }
+
+        if let Some((scope, req_id)) = request_id {
+            tx.execute(
+                "INSERT INTO experience_request_ids (actor_scope, request_id, experience_id)
+                 VALUES (?1, ?2, ?3)",
+                params![scope, req_id, entry.id],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        }
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(entry.clone())
+    }
+
+    fn get_experience_by_id(&self, id: &str) -> LoomaResult<Option<ExperienceEntry>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, subject_type, subject_id, event_type, title, note, occurred_value, occurred_precision, context_json, visibility, created_at, updated_at
+                 FROM experience_entries WHERE id = ?1",
+            )
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let res = stmt
+            .query_row(params![id], |row| {
+                let id: String = row.get(0)?;
+                let subject_type: String = row.get(1)?;
+                let subject_id: String = row.get(2)?;
+                let event_type: String = row.get(3)?;
+                let title: Option<String> = row.get(4)?;
+                let note: Option<String> = row.get(5)?;
+                let occurred_value: Option<String> = row.get(6)?;
+                let occurred_precision: String = row.get(7)?;
+                let ctx_str: String = row.get(8)?;
+                let visibility: String = row.get(9)?;
+                let c_str: String = row.get(10)?;
+                let u_str: String = row.get(11)?;
+
+                let context_json = serde_json::from_str(&ctx_str).unwrap_or(Value::Object(Default::default()));
+                let created_at = DateTime::parse_from_rfc3339(&c_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+                let updated_at = DateTime::parse_from_rfc3339(&u_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+
+                Ok(ExperienceEntry {
+                    id,
+                    subject_type,
+                    subject_id,
+                    event_type,
+                    title,
+                    note,
+                    occurred_value,
+                    occurred_precision,
+                    context_json,
+                    visibility,
+                    created_at,
+                    updated_at,
+                })
+            })
+            .optional()
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        Ok(res)
+    }
+
+    fn list_experiences(&self, filter: &ExperienceFilter) -> LoomaResult<Vec<ExperienceEntry>> {
+        let conn = self.conn.lock();
+        let mut query = "SELECT id, subject_type, subject_id, event_type, title, note, occurred_value, occurred_precision, context_json, visibility, created_at, updated_at FROM experience_entries WHERE 1=1".to_string();
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+
+        if let Some(ref sid) = filter.subject_id {
+            params_vec.push(rusqlite::types::Value::Text(sid.clone()));
+            query.push_str(&format!(" AND subject_id = ?{}", params_vec.len()));
+        }
+        if let Some(ref stype) = filter.subject_type {
+            params_vec.push(rusqlite::types::Value::Text(stype.clone()));
+            query.push_str(&format!(" AND subject_type = ?{}", params_vec.len()));
+        }
+        if let Some(ref etype) = filter.event_type {
+            params_vec.push(rusqlite::types::Value::Text(etype.clone()));
+            query.push_str(&format!(" AND event_type = ?{}", params_vec.len()));
+        }
+        if let Some(ref vis) = filter.visibility {
+            params_vec.push(rusqlite::types::Value::Text(vis.clone()));
+            query.push_str(&format!(" AND visibility = ?{}", params_vec.len()));
+        }
+
+        query.push_str(" ORDER BY created_at DESC");
+
+        if let Some(limit) = filter.limit {
+            query.push_str(&format!(" LIMIT {limit}"));
+            if let Some(offset) = filter.offset {
+                query.push_str(&format!(" OFFSET {offset}"));
+            }
+        } else if let Some(offset) = filter.offset {
+            query.push_str(&format!(" LIMIT -1 OFFSET {offset}"));
+        }
+
+        let mut stmt = conn.prepare(&query).map_err(|e| LoomaError::Database(e.to_string()))?;
+        let rusqlite_params = rusqlite::params_from_iter(params_vec.iter());
+
+        let rows: Vec<ExperienceEntry> = stmt
+            .query_map(rusqlite_params, |row| {
+                let id: String = row.get(0)?;
+                let subject_type: String = row.get(1)?;
+                let subject_id: String = row.get(2)?;
+                let event_type: String = row.get(3)?;
+                let title: Option<String> = row.get(4)?;
+                let note: Option<String> = row.get(5)?;
+                let occurred_value: Option<String> = row.get(6)?;
+                let occurred_precision: String = row.get(7)?;
+                let ctx_str: String = row.get(8)?;
+                let visibility: String = row.get(9)?;
+                let c_str: String = row.get(10)?;
+                let u_str: String = row.get(11)?;
+
+                let context_json = serde_json::from_str(&ctx_str).unwrap_or(Value::Object(Default::default()));
+                let created_at = DateTime::parse_from_rfc3339(&c_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+                let updated_at = DateTime::parse_from_rfc3339(&u_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+
+                Ok(ExperienceEntry {
+                    id,
+                    subject_type,
+                    subject_id,
+                    event_type,
+                    title,
+                    note,
+                    occurred_value,
+                    occurred_precision,
+                    context_json,
+                    visibility,
+                    created_at,
+                    updated_at,
+                })
+            })
+            .map_err(|e| LoomaError::Database(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
+    fn update_experience(&self, entry: &ExperienceEntry) -> LoomaResult<()> {
+        let conn = self.conn.lock();
+        let ctx_str = serde_json::to_string(&entry.context_json).unwrap_or_else(|_| "{}".to_string());
+        let u_str = Utc::now().to_rfc3339();
+
+        let affected = conn.execute(
+            "UPDATE experience_entries SET title = ?1, note = ?2, occurred_value = ?3, occurred_precision = ?4, context_json = ?5, visibility = ?6, updated_at = ?7
+             WHERE id = ?8",
+            params![
+                entry.title,
+                entry.note,
+                entry.occurred_value,
+                entry.occurred_precision,
+                ctx_str,
+                entry.visibility,
+                u_str,
+                entry.id,
+            ],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        if affected == 0 {
+            return Err(LoomaError::NotFound(format!("Experience entry '{}' not found", entry.id)));
+        }
+        Ok(())
+    }
+
+    fn archive_experience(&self, id: &str) -> LoomaResult<bool> {
+        let conn = self.conn.lock();
+        let u_str = Utc::now().to_rfc3339();
+        let affected = conn.execute(
+            "UPDATE experience_entries SET visibility = 'archived', updated_at = ?1 WHERE id = ?2",
+            params![u_str, id],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        Ok(affected > 0)
+    }
+
+    fn list_experience_links(&self, experience_id: &str) -> LoomaResult<Vec<ExperienceLink>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT experience_id, linked_type, linked_id, relation_type, position
+             FROM experience_links WHERE experience_id = ?1 ORDER BY position ASC",
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let links: Vec<ExperienceLink> = stmt
+            .query_map(params![experience_id], |row| {
+                Ok(ExperienceLink {
+                    experience_id: row.get(0)?,
+                    linked_type: row.get(1)?,
+                    linked_id: row.get(2)?,
+                    relation_type: row.get(3)?,
+                    position: row.get(4)?,
+                })
+            })
+            .map_err(|e| LoomaError::Database(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(links)
+    }
+
+    fn add_experience_link(&self, link: &ExperienceLink) -> LoomaResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO experience_links (experience_id, linked_type, linked_id, relation_type, position)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                link.experience_id,
+                link.linked_type,
+                link.linked_id,
+                link.relation_type,
+                link.position,
+            ],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn remove_experience_link(
+        &self,
+        experience_id: &str,
+        linked_type: &str,
+        linked_id: &str,
+    ) -> LoomaResult<bool> {
+        let conn = self.conn.lock();
+        let affected = conn.execute(
+            "DELETE FROM experience_links WHERE experience_id = ?1 AND linked_type = ?2 AND linked_id = ?3",
+            params![experience_id, linked_type, linked_id],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    fn count_experiences(&self) -> LoomaResult<u64> {
+        let conn = self.conn.lock();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM experience_entries", [], |r| r.get(0))
+            .unwrap_or(0);
+        Ok(count as u64)
+    }
+
+    fn complete_work_and_record_experience(
+        &self,
+        work_id: &str,
+        experience: &ExperienceEntry,
+        links: &[ExperienceLink],
+        request_id: Option<(&str, &str)>,
+        audit_log: &AuditLog,
+    ) -> LoomaResult<(Entity, ExperienceEntry)> {
+        let mut conn = self.conn.lock();
+
+        // 1. Check idempotency request_id before doing any writes
+        if let Some((scope, req_id)) = request_id {
+            let existing_exp_id: Option<String> = conn
+                .query_row(
+                    "SELECT experience_id FROM experience_request_ids WHERE actor_scope = ?1 AND request_id = ?2",
+                    params![scope, req_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            if let Some(exp_id) = existing_exp_id {
+                let existing_exp = conn
+                    .prepare(
+                        "SELECT id, subject_type, subject_id, event_type, title, note, occurred_value, occurred_precision, context_json, visibility, created_at, updated_at
+                         FROM experience_entries WHERE id = ?1",
+                    )
+                    .map_err(|e| LoomaError::Database(e.to_string()))?
+                    .query_row(params![exp_id], |row| {
+                        let id: String = row.get(0)?;
+                        let subject_type: String = row.get(1)?;
+                        let subject_id: String = row.get(2)?;
+                        let event_type: String = row.get(3)?;
+                        let title: Option<String> = row.get(4)?;
+                        let note: Option<String> = row.get(5)?;
+                        let occurred_value: Option<String> = row.get(6)?;
+                        let occurred_precision: String = row.get(7)?;
+                        let ctx_str: String = row.get(8)?;
+                        let visibility: String = row.get(9)?;
+                        let c_str: String = row.get(10)?;
+                        let u_str: String = row.get(11)?;
+
+                        let context_json = serde_json::from_str(&ctx_str).unwrap_or(Value::Object(Default::default()));
+                        let created_at = DateTime::parse_from_rfc3339(&c_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+                        let updated_at = DateTime::parse_from_rfc3339(&u_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+
+                        Ok(ExperienceEntry {
+                            id,
+                            subject_type,
+                            subject_id,
+                            event_type,
+                            title,
+                            note,
+                            occurred_value,
+                            occurred_precision,
+                            context_json,
+                            visibility,
+                            created_at,
+                            updated_at,
+                        })
+                    })
+                    .optional()
+                    .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+                let work = conn
+                    .prepare(
+                        "SELECT id, entity_type, title, description, properties_json, created_at, updated_at
+                         FROM entities WHERE id = ?1",
+                    )
+                    .map_err(|e| LoomaError::Database(e.to_string()))?
+                    .query_row(params![work_id], |row| {
+                        let id: String = row.get(0)?;
+                        let entity_type: String = row.get(1)?;
+                        let title: String = row.get(2)?;
+                        let description: Option<String> = row.get(3)?;
+                        let prop_str: String = row.get(4)?;
+                        let c_str: String = row.get(5)?;
+                        let u_str: String = row.get(6)?;
+
+                        let properties = serde_json::from_str(&prop_str).unwrap_or(Value::Object(Default::default()));
+                        let created_at = DateTime::parse_from_rfc3339(&c_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+                        let updated_at = DateTime::parse_from_rfc3339(&u_str).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now());
+
+                        Ok(Entity {
+                            id,
+                            entity_type,
+                            title,
+                            description,
+                            properties,
+                            created_at,
+                            updated_at,
+                        })
+                    })
+                    .optional()
+                    .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+                if let (Some(exp), Some(w)) = (existing_exp, work) {
+                    return Ok((w, exp));
+                }
+            }
+        }
+
+        // 2. Start single atomic transaction
+        let tx = conn
+            .transaction()
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // 2a. Fetch entity and update its status to completed
+        let (entity_type, title, description, prop_str, c_str) = tx
+            .query_row(
+                "SELECT entity_type, title, description, properties_json, created_at FROM entities WHERE id = ?1",
+                params![work_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| LoomaError::Database(e.to_string()))?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity '{work_id}' not found")))?;
+
+        let mut properties: Value = serde_json::from_str(&prop_str).unwrap_or(Value::Object(Default::default()));
+        if let Some(obj) = properties.as_object_mut() {
+            obj.insert("status".to_string(), serde_json::json!("completed"));
+            if let Some(work_val) = obj.get_mut("work") {
+                if let Some(work_obj) = work_val.as_object_mut() {
+                    work_obj.insert("status".to_string(), serde_json::json!("completed"));
+                    // Set end_date if not already set and precision is day/instant
+                    let current_end_date = work_obj.get("end_date").and_then(|v| v.as_str());
+                    if current_end_date.is_none() {
+                        if experience.occurred_precision == "day" {
+                            if let Some(ref date_str) = experience.occurred_value {
+                                work_obj.insert("end_date".to_string(), serde_json::json!(date_str));
+                            }
+                        } else if experience.occurred_precision == "instant" {
+                            if let Some(ref date_str) = experience.occurred_value {
+                                if date_str.len() >= 10 {
+                                    work_obj.insert("end_date".to_string(), serde_json::json!(&date_str[..10]));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let new_prop_str = serde_json::to_string(&properties).unwrap_or_else(|_| "{}".to_string());
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        tx.execute(
+            "UPDATE entities SET properties_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_prop_str, now_str, work_id],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // 2b. Insert experience entry
+        let ctx_str = serde_json::to_string(&experience.context_json).unwrap_or_else(|_| "{}".to_string());
+        let exp_created_str = experience.created_at.to_rfc3339();
+        let exp_updated_str = experience.updated_at.to_rfc3339();
+
+        tx.execute(
+            "INSERT INTO experience_entries (id, subject_type, subject_id, event_type, title, note, occurred_value, occurred_precision, context_json, visibility, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                experience.id,
+                experience.subject_type,
+                experience.subject_id,
+                experience.event_type,
+                experience.title,
+                experience.note,
+                experience.occurred_value,
+                experience.occurred_precision,
+                ctx_str,
+                experience.visibility,
+                exp_created_str,
+                exp_updated_str,
+            ],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // 2c. Insert experience links
+        for link in links {
+            tx.execute(
+                "INSERT OR REPLACE INTO experience_links (experience_id, linked_type, linked_id, relation_type, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    link.experience_id,
+                    link.linked_type,
+                    link.linked_id,
+                    link.relation_type,
+                    link.position,
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        }
+
+        // 2d. Insert request_id if present
+        if let Some((scope, req_id)) = request_id {
+            tx.execute(
+                "INSERT INTO experience_request_ids (actor_scope, request_id, experience_id)
+                 VALUES (?1, ?2, ?3)",
+                params![scope, req_id, experience.id],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        }
+
+        // 2e. Insert audit log in same transaction
+        let audit_details_str = serde_json::to_string(&audit_log.details).unwrap_or_else(|_| "{}".to_string());
+        tx.execute(
+            "INSERT INTO audit_logs (id, timestamp, actor, operation, target_type, target_id, result, details_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                audit_log.id,
+                audit_log.timestamp.to_rfc3339(),
+                audit_log.actor,
+                audit_log.operation,
+                audit_log.target_type,
+                audit_log.target_id,
+                audit_log.result,
+                audit_details_str,
+            ],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // 2f. Commit transaction atomically
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let created_at_dt = DateTime::parse_from_rfc3339(&c_str)
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or(now);
+
+        let updated_entity = Entity {
+            id: work_id.to_string(),
+            entity_type,
+            title,
+            description,
+            properties,
+            created_at: created_at_dt,
+            updated_at: now,
+        };
+
+        Ok((updated_entity, experience.clone()))
+    }
+}
+
+impl SourceRootService for LoomaDb {
+    fn create_source_root(&self, root: &SourceRoot) -> LoomaResult<SourceRoot> {
+        let conn = self.conn.lock();
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM source_roots WHERE id = ?1 OR path = ?2)",
+                params![root.id, root.path],
+                |r| r.get(0),
+            )
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        if exists {
+            return Err(LoomaError::Database(format!(
+                "SourceRoot with id '{}' or path '{}' already exists",
+                root.id, root.path
+            )));
+        }
+
+        let now = Utc::now();
+        let is_dir = Path::new(&root.path).is_dir();
+        let state = if is_dir { root_states::ONLINE } else { &root.state };
+        let last_seen = if is_dir { Some(now) } else { root.last_seen_at };
+
+        let settings_str = serde_json::to_string(&root.settings_json).unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "INSERT INTO source_roots (id, label, path, source_kind, enabled, state, last_successful_scan_at, last_seen_at, settings_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                root.id,
+                root.label,
+                root.path,
+                root.source_kind,
+                if root.enabled { 1 } else { 0 },
+                state,
+                root.last_successful_scan_at.map(|d| d.to_rfc3339()),
+                last_seen.map(|d| d.to_rfc3339()),
+                settings_str,
+            ],
+        )
+        .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut res = root.clone();
+        res.state = state.to_string();
+        res.last_seen_at = last_seen;
+        Ok(res)
+    }
+
+    fn get_source_root(&self, id: &str) -> LoomaResult<Option<SourceRoot>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, label, path, source_kind, enabled, state, last_successful_scan_at, last_seen_at, settings_json FROM source_roots WHERE id = ?1")
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let res = stmt
+            .query_row(params![id], |row| {
+                let enabled_int: i32 = row.get(4)?;
+                let last_scan_str: Option<String> = row.get(6)?;
+                let last_seen_str: Option<String> = row.get(7)?;
+                let settings_str: String = row.get(8)?;
+                let settings_json: Value = serde_json::from_str(&settings_str).unwrap_or_else(|_| serde_json::json!({}));
+
+                Ok(SourceRoot {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    path: row.get(2)?,
+                    source_kind: row.get(3)?,
+                    enabled: enabled_int == 1,
+                    state: row.get(5)?,
+                    last_successful_scan_at: last_scan_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    last_seen_at: last_seen_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    settings_json,
+                })
+            })
+            .optional()
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        Ok(res)
+    }
+
+    fn get_source_root_by_path(&self, path: &str) -> LoomaResult<Option<SourceRoot>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, label, path, source_kind, enabled, state, last_successful_scan_at, last_seen_at, settings_json FROM source_roots WHERE path = ?1")
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let res = stmt
+            .query_row(params![path], |row| {
+                let enabled_int: i32 = row.get(4)?;
+                let last_scan_str: Option<String> = row.get(6)?;
+                let last_seen_str: Option<String> = row.get(7)?;
+                let settings_str: String = row.get(8)?;
+                let settings_json: Value = serde_json::from_str(&settings_str).unwrap_or_else(|_| serde_json::json!({}));
+
+                Ok(SourceRoot {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    path: row.get(2)?,
+                    source_kind: row.get(3)?,
+                    enabled: enabled_int == 1,
+                    state: row.get(5)?,
+                    last_successful_scan_at: last_scan_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    last_seen_at: last_seen_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    settings_json,
+                })
+            })
+            .optional()
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        Ok(res)
+    }
+
+    fn list_source_roots(&self) -> LoomaResult<Vec<SourceRoot>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, label, path, source_kind, enabled, state, last_successful_scan_at, last_seen_at, settings_json FROM source_roots ORDER BY label ASC")
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let enabled_int: i32 = row.get(4)?;
+                let last_scan_str: Option<String> = row.get(6)?;
+                let last_seen_str: Option<String> = row.get(7)?;
+                let settings_str: String = row.get(8)?;
+                let settings_json: Value = serde_json::from_str(&settings_str).unwrap_or_else(|_| serde_json::json!({}));
+
+                Ok(SourceRoot {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    path: row.get(2)?,
+                    source_kind: row.get(3)?,
+                    enabled: enabled_int == 1,
+                    state: row.get(5)?,
+                    last_successful_scan_at: last_scan_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    last_seen_at: last_seen_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    settings_json,
+                })
+            })
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut roots = Vec::new();
+        for r in rows {
+            roots.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+        }
+        Ok(roots)
+    }
+
+    fn update_source_root(&self, root: &SourceRoot) -> LoomaResult<SourceRoot> {
+        let conn = self.conn.lock();
+        let settings_str = serde_json::to_string(&root.settings_json).unwrap_or_else(|_| "{}".to_string());
+        conn.execute(
+            "UPDATE source_roots SET label = ?1, path = ?2, source_kind = ?3, enabled = ?4, state = ?5,
+             last_successful_scan_at = ?6, last_seen_at = ?7, settings_json = ?8 WHERE id = ?9",
+            params![
+                root.label,
+                root.path,
+                root.source_kind,
+                if root.enabled { 1 } else { 0 },
+                root.state,
+                root.last_successful_scan_at.map(|d| d.to_rfc3339()),
+                root.last_seen_at.map(|d| d.to_rfc3339()),
+                settings_str,
+                root.id,
+            ],
+        )
+        .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        Ok(root.clone())
+    }
+
+    fn delete_source_root(&self, id: &str) -> LoomaResult<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM source_roots WHERE id = ?1", params![id])
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn rebind_source_root(&self, id: &str, new_path: &str) -> LoomaResult<SourceRoot> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // 1. Fetch current root
+        let mut root: SourceRoot = tx.query_row(
+            "SELECT id, label, path, source_kind, enabled, state, last_successful_scan_at, last_seen_at, settings_json
+             FROM source_roots WHERE id = ?1",
+            params![id],
+            |row| {
+                let enabled_int: i32 = row.get(4)?;
+                let last_scan_str: Option<String> = row.get(6)?;
+                let last_seen_str: Option<String> = row.get(7)?;
+                let settings_str: String = row.get(8)?;
+                let settings_json: Value = serde_json::from_str(&settings_str).unwrap_or_else(|_| serde_json::json!({}));
+                Ok(SourceRoot {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    path: row.get(2)?,
+                    source_kind: row.get(3)?,
+                    enabled: enabled_int == 1,
+                    state: row.get(5)?,
+                    last_successful_scan_at: last_scan_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    last_seen_at: last_seen_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    settings_json,
+                })
+            },
+        ).optional().map_err(|e| LoomaError::Database(e.to_string()))?
+        .ok_or_else(|| LoomaError::NotFound(format!("SourceRoot '{id}' not found")))?;
+
+        let old_root_path = root.path.clone();
+
+        // 2. Update source_roots table with new path
+        let is_dir = Path::new(new_path).is_dir();
+        let new_state = if is_dir { root_states::ONLINE } else { root_states::OFFLINE };
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        tx.execute(
+            "UPDATE source_roots SET path = ?1, state = ?2, last_seen_at = ?3 WHERE id = ?4",
+            params![new_path, new_state, if is_dir { Some(&now_str) } else { None }, id],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // 3. Find all assets linked via asset_lifecycle with this root_id
+        let mut lifecycles: Vec<(String, Option<String>)> = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT asset_id, relative_path FROM asset_lifecycle WHERE root_id = ?1"
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+            let rows = stmt.query_map(params![id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+            for r in rows {
+                if let Ok(item) = r {
+                    lifecycles.push(item);
+                }
+            }
+        }
+
+        // 4. Update each asset path and lifecycle availability
+        for (asset_id, rel_path_opt) in lifecycles {
+            if let Some(rel_path) = rel_path_opt {
+                let clean_rel = rel_path.trim_start_matches('/').trim_start_matches('\\');
+                let clean_root = new_path.trim_end_matches('/').trim_end_matches('\\');
+                let full_new_path = format!("{clean_root}/{clean_rel}");
+
+                let file_exists = Path::new(&full_new_path).exists();
+                let avail = if file_exists { asset_availability::ONLINE } else { asset_availability::UNCHECKED };
+
+                tx.execute(
+                    "UPDATE assets SET path = ?1 WHERE id = ?2",
+                    params![full_new_path, asset_id],
+                ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+                tx.execute(
+                    "UPDATE asset_lifecycle SET availability = ?1, last_verified_at = ?2 WHERE asset_id = ?3",
+                    params![avail, if file_exists { Some(&now_str) } else { None }, asset_id],
+                ).map_err(|e| LoomaError::Database(e.to_string()))?;
+            }
+        }
+
+        // Also update any assets whose path was starting with old_root_path
+        let old_clean = old_root_path.trim_end_matches('/').trim_end_matches('\\');
+        let new_clean = new_path.trim_end_matches('/').trim_end_matches('\\');
+        let old_prefix = format!("{old_clean}/");
+        let mut prefix_assets: Vec<(String, String)> = Vec::new();
+        {
+            let mut stmt = tx.prepare("SELECT id, path FROM assets WHERE path LIKE ?1").map_err(|e| LoomaError::Database(e.to_string()))?;
+            let pattern = format!("{old_clean}%");
+            let rows = stmt.query_map(params![pattern], |row| {
+                let aid: String = row.get(0)?;
+                let p: Option<String> = row.get(1)?;
+                Ok((aid, p.unwrap_or_default()))
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+            for r in rows {
+                if let Ok((aid, p)) = r {
+                    if p.starts_with(&old_prefix) || p == old_clean {
+                        prefix_assets.push((aid, p));
+                    }
+                }
+            }
+        }
+
+        for (aid, old_p) in prefix_assets {
+            let rel = if old_p.len() >= old_prefix.len() {
+                &old_p[old_prefix.len()..]
+            } else {
+                ""
+            };
+            let full_new = if rel.is_empty() {
+                new_clean.to_string()
+            } else {
+                format!("{new_clean}/{rel}")
+            };
+            let _ = tx.execute("UPDATE assets SET path = ?1 WHERE id = ?2", params![full_new, aid]);
+            let file_exists = Path::new(&full_new).exists();
+            let avail = if file_exists { asset_availability::ONLINE } else { asset_availability::UNCHECKED };
+            let _ = tx.execute(
+                "INSERT INTO asset_lifecycle (asset_id, root_id, relative_path, availability, visibility, tracking, last_verified_at)
+                 VALUES (?1, ?2, ?3, ?4, 'active', 'tracked', ?5)
+                 ON CONFLICT(asset_id) DO UPDATE SET
+                   root_id = COALESCE(excluded.root_id, asset_lifecycle.root_id),
+                   relative_path = COALESCE(excluded.relative_path, asset_lifecycle.relative_path),
+                   availability = excluded.availability,
+                   last_verified_at = excluded.last_verified_at",
+                params![aid, id, rel, avail, if file_exists { Some(&now_str) } else { None }],
+            );
+        }
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        root.path = new_path.to_string();
+        root.state = new_state.to_string();
+        if is_dir {
+            root.last_seen_at = Some(now);
+        }
+        Ok(root)
+    }
+
+    fn inspect_source_root(&self, id: &str) -> LoomaResult<SourceRootInspection> {
+        let root = self.get_source_root(id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("SourceRoot '{id}' not found")))?;
+
+        let p = Path::new(&root.path);
+        let exists = p.exists();
+        let is_dir = p.is_dir();
+        let accessible = exists && is_dir && std::fs::read_dir(p).is_ok();
+
+        let conn = self.conn.lock();
+        let tracked_assets: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM asset_lifecycle WHERE root_id = ?1 AND tracking = 'tracked'",
+            params![id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let online_assets: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM asset_lifecycle WHERE root_id = ?1 AND availability = 'online'",
+            params![id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let offline_assets: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM asset_lifecycle WHERE root_id = ?1 AND availability = 'offline'",
+            params![id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let missing_assets: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM asset_lifecycle WHERE root_id = ?1 AND availability = 'missing'",
+            params![id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let unchecked_assets: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM asset_lifecycle WHERE root_id = ?1 AND availability = 'unchecked'",
+            params![id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        let suppressed_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM asset_scan_suppressions WHERE root_id = ?1",
+            params![id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+
+        Ok(SourceRootInspection {
+            root_id: root.id,
+            label: root.label,
+            path: root.path,
+            state: root.state,
+            exists,
+            is_dir,
+            accessible,
+            tracked_assets: tracked_assets as usize,
+            online_assets: online_assets as usize,
+            offline_assets: offline_assets as usize,
+            missing_assets: missing_assets as usize,
+            unchecked_assets: unchecked_assets as usize,
+            suppressed_count: suppressed_count as usize,
+        })
+    }
+
+    fn get_asset_lifecycle(&self, asset_id: &str) -> LoomaResult<Option<AssetLifecycle>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT asset_id, root_id, relative_path, availability, visibility, tracking, last_verified_at, untracked_at, untracked_reason
+             FROM asset_lifecycle WHERE asset_id = ?1"
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let res = stmt.query_row(params![asset_id], |row| {
+            let last_verified_str: Option<String> = row.get(6)?;
+            let untracked_str: Option<String> = row.get(7)?;
+            Ok(AssetLifecycle {
+                asset_id: row.get(0)?,
+                root_id: row.get(1)?,
+                relative_path: row.get(2)?,
+                availability: row.get(3)?,
+                visibility: row.get(4)?,
+                tracking: row.get(5)?,
+                last_verified_at: last_verified_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                untracked_at: untracked_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                untracked_reason: row.get(8)?,
+            })
+        }).optional().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        Ok(res)
+    }
+
+    fn set_asset_lifecycle(&self, lifecycle: &AssetLifecycle) -> LoomaResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO asset_lifecycle (asset_id, root_id, relative_path, availability, visibility, tracking, last_verified_at, untracked_at, untracked_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(asset_id) DO UPDATE SET
+               root_id = excluded.root_id,
+               relative_path = excluded.relative_path,
+               availability = excluded.availability,
+               visibility = excluded.visibility,
+               tracking = excluded.tracking,
+               last_verified_at = excluded.last_verified_at,
+               untracked_at = excluded.untracked_at,
+               untracked_reason = excluded.untracked_reason",
+            params![
+                lifecycle.asset_id,
+                lifecycle.root_id,
+                lifecycle.relative_path,
+                lifecycle.availability,
+                lifecycle.visibility,
+                lifecycle.tracking,
+                lifecycle.last_verified_at.map(|d| d.to_rfc3339()),
+                lifecycle.untracked_at.map(|d| d.to_rfc3339()),
+                lifecycle.untracked_reason,
+            ],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn archive_asset(&self, asset_id: &str) -> LoomaResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assets WHERE id = ?1)",
+            params![asset_id],
+            |r| r.get(0),
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        if !exists {
+            return Err(LoomaError::NotFound(format!("Asset '{asset_id}' not found")));
+        }
+
+        tx.execute(
+            "INSERT INTO asset_lifecycle (asset_id, availability, visibility, tracking)
+             VALUES (?1, 'unchecked', 'archived', 'tracked')
+             ON CONFLICT(asset_id) DO UPDATE SET visibility = 'archived'",
+            params![asset_id],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        tx.execute("UPDATE assets SET status = 'archived' WHERE id = ?1", params![asset_id])
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn unarchive_asset(&self, asset_id: &str) -> LoomaResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        tx.execute(
+            "UPDATE asset_lifecycle SET visibility = 'active' WHERE asset_id = ?1",
+            params![asset_id],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        tx.execute("UPDATE assets SET status = 'active' WHERE id = ?1", params![asset_id])
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn untrack_asset(&self, asset_id: &str, reason: Option<&str>) -> LoomaResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let asset_path: Option<String> = tx.query_row(
+            "SELECT path FROM assets WHERE id = ?1",
+            params![asset_id],
+            |r| r.get(0),
+        ).optional().map_err(|e| LoomaError::Database(e.to_string()))?
+        .ok_or_else(|| LoomaError::NotFound(format!("Asset '{asset_id}' not found")))?;
+
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        // Check or create lifecycle
+        let existing_lc: Option<(Option<String>, Option<String>)> = tx.query_row(
+            "SELECT root_id, relative_path FROM asset_lifecycle WHERE asset_id = ?1",
+            params![asset_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let (mut root_id, mut rel_path) = match existing_lc {
+            Some((r, p)) => (r, p),
+            None => (None, None),
+        };
+
+        // If root_id is missing but we have path, match against source_roots
+        if (root_id.is_none() || rel_path.is_none()) && asset_path.is_some() {
+            let p_str = asset_path.as_ref().unwrap();
+            let norm_asset = p_str.replace('\\', "/");
+            let mut stmt = tx.prepare("SELECT id, path FROM source_roots").map_err(|e| LoomaError::Database(e.to_string()))?;
+            let root_rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for r in root_rows.flatten() {
+                let norm_root = r.1.replace('\\', "/");
+                let prefix = format!("{}/", norm_root.trim_end_matches('/'));
+                if norm_asset.starts_with(&prefix) {
+                    root_id = Some(r.0);
+                    rel_path = Some(norm_asset[prefix.len()..].to_string());
+                    break;
+                }
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO asset_lifecycle (asset_id, root_id, relative_path, availability, visibility, tracking, untracked_at, untracked_reason)
+             VALUES (?1, ?2, ?3, 'unchecked', 'active', 'untracked', ?4, ?5)
+             ON CONFLICT(asset_id) DO UPDATE SET
+               root_id = COALESCE(excluded.root_id, asset_lifecycle.root_id),
+               relative_path = COALESCE(excluded.relative_path, asset_lifecycle.relative_path),
+               tracking = 'untracked',
+               untracked_at = excluded.untracked_at,
+               untracked_reason = excluded.untracked_reason",
+            params![asset_id, root_id, rel_path, now_str, reason],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        // If we have root_id and relative_path, record suppression tombstone
+        if let (Some(rid), Some(rpath)) = (&root_id, &rel_path) {
+            let sup_id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO asset_scan_suppressions (id, root_id, relative_path, reason, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(root_id, relative_path) DO UPDATE SET reason = excluded.reason",
+                params![sup_id, rid, rpath, reason, now_str],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        }
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn resume_tracking(&self, asset_id: &str) -> LoomaResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let existing: Option<(Option<String>, Option<String>)> = tx.query_row(
+            "SELECT root_id, relative_path FROM asset_lifecycle WHERE asset_id = ?1",
+            params![asset_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        tx.execute(
+            "UPDATE asset_lifecycle SET tracking = 'tracked', untracked_at = NULL, untracked_reason = NULL WHERE asset_id = ?1",
+            params![asset_id],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        if let Some((Some(rid), Some(rpath))) = existing {
+            tx.execute(
+                "DELETE FROM asset_scan_suppressions WHERE root_id = ?1 AND relative_path = ?2",
+                params![rid, rpath],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        }
+
+        tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn is_asset_suppressed(&self, root_id: &str, relative_path: &str) -> LoomaResult<bool> {
+        let clean_rel = relative_path.trim_start_matches('/').trim_start_matches('\\');
+        let conn = self.conn.lock();
+        let suppressed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM asset_scan_suppressions WHERE root_id = ?1 AND relative_path = ?2)",
+            params![root_id, clean_rel],
+            |r| r.get(0),
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(suppressed)
+    }
+
+    fn list_suppressions(&self, root_id: Option<&str>) -> LoomaResult<Vec<AssetScanSuppression>> {
+        let conn = self.conn.lock();
+        let mut results = Vec::new();
+        if let Some(rid) = root_id {
+            let mut stmt = conn.prepare(
+                "SELECT id, root_id, relative_path, reason, created_at FROM asset_scan_suppressions WHERE root_id = ?1 ORDER BY created_at DESC"
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+            let rows = stmt.query_map(params![rid], |row| {
+                let dt_str: String = row.get(4)?;
+                let created_at = DateTime::parse_from_rfc3339(&dt_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                Ok(AssetScanSuppression {
+                    id: row.get(0)?,
+                    root_id: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    reason: row.get(3)?,
+                    created_at,
+                })
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+            for r in rows {
+                results.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, root_id, relative_path, reason, created_at FROM asset_scan_suppressions ORDER BY created_at DESC"
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+            let rows = stmt.query_map([], |row| {
+                let dt_str: String = row.get(4)?;
+                let created_at = DateTime::parse_from_rfc3339(&dt_str)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                Ok(AssetScanSuppression {
+                    id: row.get(0)?,
+                    root_id: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    reason: row.get(3)?,
+                    created_at,
+                })
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+            for r in rows {
+                results.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+            }
+        }
+        Ok(results)
+    }
+
+    fn add_suppression(&self, root_id: &str, relative_path: &str, reason: Option<&str>) -> LoomaResult<()> {
+        let clean_rel = relative_path.trim_start_matches('/').trim_start_matches('\\');
+        let conn = self.conn.lock();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO asset_scan_suppressions (id, root_id, relative_path, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, relative_path) DO UPDATE SET reason = excluded.reason",
+            params![id, root_id, clean_rel, reason, now],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn remove_suppression(&self, root_id: &str, relative_path: &str) -> LoomaResult<()> {
+        let clean_rel = relative_path.trim_start_matches('/').trim_start_matches('\\');
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM asset_scan_suppressions WHERE root_id = ?1 AND relative_path = ?2",
+            params![root_id, clean_rel],
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(())
     }
 }

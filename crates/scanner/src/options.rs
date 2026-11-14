@@ -14,6 +14,9 @@ pub struct ScanOptions {
     /// Maximum file size to compute hash for (in bytes). Files larger than this will have hash = None.
     /// Default: 500 MB (500 * 1024 * 1024). Set to None to hash all files.
     pub max_hash_file_size: Option<u64>,
+    /// Relative paths (normalized with forward slashes) suppressed from being indexed.
+    #[serde(default)]
+    pub suppressed_relative_paths: Vec<String>,
 }
 
 impl Default for ScanOptions {
@@ -24,6 +27,7 @@ impl Default for ScanOptions {
             ignore_hidden: true,
             follow_symlinks: false,
             max_hash_file_size: Some(500 * 1024 * 1024), // 500 MB
+            suppressed_relative_paths: Vec::new(),
         }
     }
 }
@@ -48,5 +52,7 @@ pub struct ScanSummary {
     pub modified_assets: usize,
     pub unchanged_assets: usize,
     pub missing_assets: usize,
+    #[serde(default)]
+    pub suppressed_assets: usize,
     pub errors: Vec<String>,
 }

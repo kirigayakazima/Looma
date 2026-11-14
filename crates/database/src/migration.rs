@@ -20,6 +20,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "002_audit_and_references",
         sql: include_str!("migrations/002_audit_and_references.sql"),
     },
+    Migration {
+        version: 3,
+        name: "003_experience",
+        sql: include_str!("migrations/003_experience.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "004_source_root",
+        sql: include_str!("migrations/004_source_root.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> LoomaResult<()> {

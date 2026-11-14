@@ -3,9 +3,10 @@ pub mod cloud;
 use crate::error::LoomaResult;
 pub use cloud::{CloudStorage, LocalDirStorage, RemoteObjectMeta};
 use crate::models::{
-    Asset, AssetFilter, BackupResult, Collection, CollectionItem, Entity, EntityFilter,
-    IntegrityRepairPlan, Memory, Relation, RestoreResult, TimelineFilter, TimelineItem,
-    VaultDoctorReport, VaultInfo, VaultManifest, VaultStats,
+    Asset, AssetFilter, AssetLifecycle, AssetScanSuppression, BackupResult, Collection,
+    CollectionItem, Entity, EntityFilter, ExperienceEntry, ExperienceFilter, ExperienceLink,
+    IntegrityRepairPlan, Memory, Relation, RestoreResult, SourceRoot, SourceRootInspection,
+    TimelineFilter, TimelineItem, VaultDoctorReport, VaultInfo, VaultManifest, VaultStats,
 };
 
 pub trait VaultService: Send + Sync {
@@ -87,4 +88,63 @@ pub trait ExternalReferenceService: Send + Sync {
     fn delete_external_reference(&self, id: &str) -> LoomaResult<bool>;
     fn set_primary_external_reference(&self, entity_id: &str, reference_id: &str) -> LoomaResult<()>;
 }
+
+pub trait ExperienceService: Send + Sync {
+    fn create_experience(
+        &self,
+        entry: &ExperienceEntry,
+        links: &[ExperienceLink],
+        request_id: Option<(&str, &str)>,
+    ) -> LoomaResult<ExperienceEntry>;
+    fn get_experience_by_id(&self, id: &str) -> LoomaResult<Option<ExperienceEntry>>;
+    fn list_experiences(&self, filter: &ExperienceFilter) -> LoomaResult<Vec<ExperienceEntry>>;
+    fn update_experience(&self, entry: &ExperienceEntry) -> LoomaResult<()>;
+    fn archive_experience(&self, id: &str) -> LoomaResult<bool>;
+    fn list_experience_links(&self, experience_id: &str) -> LoomaResult<Vec<ExperienceLink>>;
+    fn add_experience_link(&self, link: &ExperienceLink) -> LoomaResult<()>;
+    fn remove_experience_link(
+        &self,
+        experience_id: &str,
+        linked_type: &str,
+        linked_id: &str,
+    ) -> LoomaResult<bool>;
+    fn count_experiences(&self) -> LoomaResult<u64>;
+
+    /// Atomic composite transaction:
+    /// Updates work status, creates experience entry, records idempotency request_id,
+    /// establishes links, and records audit log in a SINGLE SQLite transaction.
+    fn complete_work_and_record_experience(
+        &self,
+        work_id: &str,
+        experience: &ExperienceEntry,
+        links: &[ExperienceLink],
+        request_id: Option<(&str, &str)>,
+        audit_log: &crate::models::AuditLog,
+    ) -> LoomaResult<(Entity, ExperienceEntry)>;
+}
+
+pub trait SourceRootService: Send + Sync {
+    fn create_source_root(&self, root: &SourceRoot) -> LoomaResult<SourceRoot>;
+    fn get_source_root(&self, id: &str) -> LoomaResult<Option<SourceRoot>>;
+    fn get_source_root_by_path(&self, path: &str) -> LoomaResult<Option<SourceRoot>>;
+    fn list_source_roots(&self) -> LoomaResult<Vec<SourceRoot>>;
+    fn update_source_root(&self, root: &SourceRoot) -> LoomaResult<SourceRoot>;
+    fn delete_source_root(&self, id: &str) -> LoomaResult<()>;
+    fn rebind_source_root(&self, id: &str, new_path: &str) -> LoomaResult<SourceRoot>;
+    fn inspect_source_root(&self, id: &str) -> LoomaResult<SourceRootInspection>;
+
+    fn get_asset_lifecycle(&self, asset_id: &str) -> LoomaResult<Option<AssetLifecycle>>;
+    fn set_asset_lifecycle(&self, lifecycle: &AssetLifecycle) -> LoomaResult<()>;
+    fn archive_asset(&self, asset_id: &str) -> LoomaResult<()>;
+    fn unarchive_asset(&self, asset_id: &str) -> LoomaResult<()>;
+    fn untrack_asset(&self, asset_id: &str, reason: Option<&str>) -> LoomaResult<()>;
+    fn resume_tracking(&self, asset_id: &str) -> LoomaResult<()>;
+
+    fn is_asset_suppressed(&self, root_id: &str, relative_path: &str) -> LoomaResult<bool>;
+    fn list_suppressions(&self, root_id: Option<&str>) -> LoomaResult<Vec<AssetScanSuppression>>;
+    fn add_suppression(&self, root_id: &str, relative_path: &str, reason: Option<&str>) -> LoomaResult<()>;
+    fn remove_suppression(&self, root_id: &str, relative_path: &str) -> LoomaResult<()>;
+}
+
+
 

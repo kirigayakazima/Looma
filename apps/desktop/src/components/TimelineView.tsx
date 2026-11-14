@@ -17,6 +17,7 @@ import {
   FileQuestion,
   Clock,
   X,
+  Compass,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -37,7 +38,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 }) => {
   const [timelineItems, setTimelineItems] = useState<TimelineItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedType, setSelectedType] = useState<'all' | 'asset' | 'entity' | 'memory'>('all');
+  const [selectedType, setSelectedType] = useState<'all' | 'asset' | 'entity' | 'memory' | 'experience'>('all');
   const [selectedYear, setSelectedYear] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -193,6 +194,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         return <Layers className={`${cls} text-indigo-400`} />;
       case 'memory':
         return <BookOpen className={`${cls} text-amber-400`} />;
+      case 'experience':
+        return <Compass className={`${cls} text-emerald-400`} />;
       case 'asset':
         switch (badge) {
           case 'image':
@@ -235,6 +238,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         return (
           <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 font-mono border border-amber-500/20">
             {item.badge || 'Memory'}
+          </span>
+        );
+      case 'experience':
+        return (
+          <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 font-mono border border-emerald-500/20">
+            {item.badge ? `足迹 · ${item.badge}` : '足迹'}
           </span>
         );
     }
@@ -326,6 +335,16 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
             }`}
           >
             记忆手记
+          </button>
+          <button
+            onClick={() => setSelectedType('experience')}
+            className={`px-2.5 py-1 rounded-md transition-colors ${
+              selectedType === 'experience'
+                ? 'bg-emerald-500/20 text-emerald-300 font-medium border border-emerald-500/30'
+                : 'text-neutral-400 hover:text-neutral-200'
+            }`}
+          >
+            个人足迹
           </button>
 
           {/* Year selector */}
@@ -490,6 +509,37 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                 <div className="p-3 rounded-lg bg-neutral-950/60 border border-neutral-800/80">
                   <MarkdownRenderer content={activeItem.description} />
                 </div>
+              ) : activeItem.item_type === 'experience' ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded text-xs bg-emerald-500/10 text-emerald-400 font-medium border border-emerald-500/20">
+                      {activeItem.badge || 'Footprint'}
+                    </span>
+                    <span className="text-xs text-neutral-400 font-mono">
+                      {activeItem.timestamp.substring(0, 10)}
+                    </span>
+                  </div>
+                  {activeItem.description && (
+                    <div className="p-3 rounded-lg bg-neutral-950/60 border border-neutral-800/80">
+                      <MarkdownRenderer content={activeItem.description} />
+                    </div>
+                  )}
+                  {activeItem.metadata && Object.keys(activeItem.metadata).length > 0 && (
+                    <div className="p-3 rounded-lg bg-neutral-950 border border-neutral-800 space-y-1.5">
+                      <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider">
+                        上下文属性
+                      </p>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        {Object.entries(activeItem.metadata).map(([k, v]) => (
+                          <div key={k} className="flex space-x-1">
+                            <span className="text-neutral-500">{k}:</span>
+                            <span className="text-neutral-200 font-mono truncate">{String(v)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               ) : activeItem.item_type === 'entity' ? (
                 <div className="space-y-2">
                   {activeItem.description && (
@@ -541,6 +591,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                       ? 'assets'
                       : activeItem.item_type === 'entity'
                       ? 'entities'
+                      : activeItem.item_type === 'experience'
+                      ? 'collections'
                       : 'memories';
                   setActiveItem(null);
                   onNavigateTab(targetTab);

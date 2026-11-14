@@ -18,13 +18,29 @@ fn resolve_default_vault_path() -> PathBuf {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut vault_path = resolve_default_vault_path();
-    let mut permission = McpPermissionLevel::ContentWrite;
+    let mut permission = McpPermissionLevel::ReadOnly;
+
+    if let Ok(p_str) = std::env::var("LOOMA_MCP_PERMISSION") {
+        match p_str.to_lowercase().as_str() {
+            "content_write" | "write" => permission = McpPermissionLevel::ContentWrite,
+            "metadata_write" | "metadata" => permission = McpPermissionLevel::MetadataWrite,
+            "destructive" | "full" => permission = McpPermissionLevel::FullDestructive,
+            "readonly" | "read" => permission = McpPermissionLevel::ReadOnly,
+            _ => {}
+        }
+    }
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--allow-destructive" => {
                 permission = McpPermissionLevel::FullDestructive;
+            }
+            "--allow-write" | "--write" | "--content-write" => {
+                permission = McpPermissionLevel::ContentWrite;
+            }
+            "--metadata-write" => {
+                permission = McpPermissionLevel::MetadataWrite;
             }
             "--read-only" => {
                 permission = McpPermissionLevel::ReadOnly;

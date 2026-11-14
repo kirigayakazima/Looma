@@ -21,3 +21,5 @@ hex.workspace = true
 
 [dev-dependencies]
 looma-mcp.workspace = true
+looma-scanner = { path = "../scanner" }
+tempfile = "3"

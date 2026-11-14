@@ -8,6 +8,7 @@ import {
   CollectionItem,
   Relation,
   ExternalReference,
+  ExperienceEntry,
   TimelineItem,
   WorkSummary,
 } from './types';
@@ -23,6 +24,7 @@ interface WebStore {
   collectionItems: CollectionItem[];
   relations: Relation[];
   externalReferences: ExternalReference[];
+  experiences: ExperienceEntry[];
 }
 
 function getDefaultStore(): WebStore {
@@ -596,6 +598,22 @@ function getDefaultStore(): WebStore {
         updated_at: '2023-10-01T12:00:00Z',
       },
     ],
+    experiences: [
+      {
+        id: 'exp_nier_end_e',
+        subject_type: 'entity',
+        subject_id: 'work_nier',
+        event_type: 'completed',
+        title: '达成 E 结局 · 最终的献身',
+        note: '在绝望的弹幕射击中，世界各地的存档数据伸出援手。',
+        occurred_value: '2021-04-20',
+        occurred_precision: 'day',
+        context_json: { platform: 'PC', playthrough: 3 },
+        visibility: 'normal',
+        created_at: '2021-04-20T22:30:00Z',
+        updated_at: '2021-04-20T22:30:00Z',
+      },
+    ],
   };
 }
 
@@ -816,6 +834,7 @@ class WebVaultService {
     const linked_collections = this.store.collections.filter((c) => colIds.has(c.id));
 
     const external_references = this.store.externalReferences.filter((r) => r.entity_id === id);
+    const experiences = (this.store.experiences || []).filter((e) => e.subject_id === id && e.visibility === 'normal');
 
     return {
       entity: ent,
@@ -825,6 +844,7 @@ class WebVaultService {
       linked_memories,
       linked_collections,
       external_references,
+      experiences,
     };
   }
 
@@ -995,7 +1015,87 @@ class WebVaultService {
         metadata: a.metadata,
       });
     });
+    (this.store.experiences || []).forEach((exp) => {
+      if (exp.visibility === 'archived') return;
+      const targetEntity = this.store.entities.find((e) => e.id === exp.subject_id);
+      items.push({
+        id: 'time_exp_' + exp.id,
+        item_type: 'experience',
+        timestamp:
+          exp.occurred_value && exp.occurred_precision !== 'unknown'
+            ? exp.occurred_precision === 'year'
+              ? `${exp.occurred_value}-01-01T00:00:00Z`
+              : exp.occurred_precision === 'month'
+              ? `${exp.occurred_value}-01T00:00:00Z`
+              : exp.occurred_precision === 'day'
+              ? `${exp.occurred_value}T00:00:00Z`
+              : exp.occurred_value
+            : exp.created_at,
+        title: exp.title || `${targetEntity?.title || 'Unknown'}: ${exp.event_type}`,
+        description: exp.note || null,
+        badge: exp.event_type,
+        metadata: {
+          ...exp.context_json,
+          subject_id: exp.subject_id,
+          subject_title: targetEntity?.title,
+          occurred_precision: exp.occurred_precision,
+          occurred_value: exp.occurred_value,
+        },
+      });
+    });
     return items.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }
+
+  public recordExperience(entry: Partial<ExperienceEntry>): ExperienceEntry {
+    const id = entry.id || `exp_${Math.random().toString(36).substring(2, 9)}`;
+    const now = new Date().toISOString();
+    const newExp: ExperienceEntry = {
+      id,
+      subject_type: 'entity',
+      subject_id: entry.subject_id!,
+      event_type: entry.event_type || 'completed',
+      title: entry.title || null,
+      note: entry.note || null,
+      occurred_value: entry.occurred_value || null,
+      occurred_precision: (entry.occurred_precision as any) || 'unknown',
+      context_json: entry.context_json || {},
+      visibility: entry.visibility || 'normal',
+      created_at: now,
+      updated_at: now,
+    };
+    if (!this.store.experiences) this.store.experiences = [];
+    this.store.experiences.unshift(newExp);
+    this.saveStore();
+    return newExp;
+  }
+
+  public completeWorkAndRecordExperience(
+    workId: string,
+    entry: Partial<ExperienceEntry>
+  ): [Entity, ExperienceEntry] {
+    const exp = this.recordExperience({
+      ...entry,
+      subject_id: workId,
+      event_type: entry.event_type || 'completed',
+    });
+    this.updateWorkStatus(workId, 'completed');
+    const ent = this.getEntity(workId)!;
+    return [ent, exp];
+  }
+
+  public listExperiencesForWork(workId: string): ExperienceEntry[] {
+    return (this.store.experiences || []).filter((e) => e.subject_id === workId);
+  }
+
+  public archiveExperience(id: string): boolean {
+    const exp = (this.store.experiences || []).find((e) => e.id === id);
+    if (exp) {
+      exp.visibility = 'archived';
+      exp.updated_at = new Date().toISOString();
+      this.saveStore();
+      return true;
+    }
+    return false;
   }
 
   public resetToDefault() {
@@ -1163,6 +1263,32 @@ export function initWebMockAdapter() {
           tag_suggestions: [],
           cluster_suggestions: [],
         };
+      case 'record_experience':
+        return webVault.recordExperience({
+          subject_id: args.subjectId || args.subject_id,
+          event_type: args.eventType || args.event_type || 'note',
+          title: args.title,
+          note: args.note,
+          occurred_precision: args.occurredPrecision || args.occurred_precision || 'unknown',
+          occurred_value: args.occurredValue || args.occurred_value || null,
+          context_json: args.contextJson || args.context_json || {},
+        });
+      case 'complete_work_and_record_experience':
+        return webVault.completeWorkAndRecordExperience(
+          args.workId || args.work_id,
+          {
+            event_type: args.eventType || args.event_type || 'completed',
+            title: args.title,
+            note: args.note,
+            occurred_precision: args.occurredPrecision || args.occurred_precision || 'unknown',
+            occurred_value: args.occurredValue || args.occurred_value || null,
+            context_json: args.contextJson || args.context_json || {},
+          }
+        );
+      case 'list_experiences_for_work':
+        return webVault.listExperiencesForWork(args.workId || args.work_id);
+      case 'archive_experience':
+        return webVault.archiveExperience(args.id);
       default:
         console.warn(`[Web Mock IPC] Unhandled cmd: ${cmd}`, args);
         return null;

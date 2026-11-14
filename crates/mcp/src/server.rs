@@ -30,7 +30,7 @@ impl McpServer {
     pub fn new(core: LoomaCore) -> Self {
         Self {
             core,
-            permission: McpPermissionLevel::ContentWrite,
+            permission: McpPermissionLevel::ReadOnly,
         }
     }
 
@@ -287,12 +287,30 @@ impl McpServer {
 
         let entity_id_opt = uri.strip_prefix("looma://entity/").or_else(|| uri.strip_prefix("looma://work/"));
         if let Some(id) = entity_id_opt {
+            if let Some(work_id) = id.strip_suffix("/experiences") {
+                let exps = self.core.list_experiences_for_work(work_id).map_err(|e| e.to_string())?;
+                let s = serde_json::to_string_pretty(&exps).map_err(|e| e.to_string())?;
+                return Ok(("application/json", s));
+            }
+
             if let Some(summary) = self.core.get_work_summary(id).map_err(|e| e.to_string())? {
                 let s = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
                 return Ok(("application/json", s));
             } else {
                 return Err(format!("Entity/Work not found: {id}"));
             }
+        }
+
+        if let Some(exp_id) = uri.strip_prefix("looma://experience/") {
+            let exp = self.core.get_experience(exp_id).map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Experience not found: {exp_id}"))?;
+            let links = self.core.list_experience_links(exp_id).unwrap_or_default();
+            let payload = json!({
+                "experience": exp,
+                "links": links,
+            });
+            let s = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+            return Ok(("application/json", s));
         }
 
         if let Some(id) = uri.strip_prefix("looma://memory/") {
@@ -690,6 +708,92 @@ impl McpServer {
                         "cleanup_missing": { "type": "boolean", "description": "If true (requires DestructiveWrite permission), mark missing assets and run VACUUM" }
                     }
                 }
+            }),
+            json!({
+                "name": "list_experiences",
+                "description": "[ReadOnly] Query personal footprints and life events by Work ID or event type",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subject_id": { "type": "string", "description": "Filter by target Work / Entity ID" },
+                        "event_type": { "type": "string", "description": "Filter by event type (completed, started, replayed, milestone, etc.)" },
+                        "limit": { "type": "integer", "description": "Maximum entries to return" }
+                    }
+                }
+            }),
+            json!({
+                "name": "get_experience",
+                "description": "[ReadOnly] Get detailed information and linked items for an experience footprint",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Experience ID" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "record_experience",
+                "description": "[ContentWrite] Record a new personal footprint or life event for a Work entity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subject_id": { "type": "string", "description": "Existing Work Entity ID" },
+                        "event_type": { "type": "string", "description": "Event type: completed, started, replayed, milestone, published, created, reflection" },
+                        "title": { "type": "string", "description": "Optional title for this footprint" },
+                        "note": { "type": "string", "description": "Optional brief reflection or note" },
+                        "occurred_precision": { "type": "string", "enum": ["unknown", "year", "month", "day", "instant"], "description": "Date precision. Default: 'unknown'" },
+                        "occurred_value": { "type": "string", "description": "Date string: null for unknown, YYYY for year, YYYY-MM for month, YYYY-MM-DD for day, RFC3339 for instant" },
+                        "context": { "type": "object", "description": "Contextual metadata (e.g. platform, environment, playthrough)" },
+                        "request_id": { "type": "string", "description": "Client-generated idempotency key to prevent duplicate creation on network retry" }
+                    },
+                    "required": ["subject_id", "event_type"]
+                }
+            }),
+            json!({
+                "name": "complete_work_with_experience",
+                "description": "[ContentWrite] Atomically mark a Work as completed and record a completion footprint in a single database transaction",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "work_id": { "type": "string", "description": "Existing Work Entity ID to complete" },
+                        "event_type": { "type": "string", "description": "Event type (default: 'completed', or 'replayed')", "default": "completed" },
+                        "title": { "type": "string", "description": "Optional title (default: '完成首次通关')" },
+                        "note": { "type": "string", "description": "Optional brief reflection / completion note" },
+                        "occurred_precision": { "type": "string", "enum": ["unknown", "year", "month", "day", "instant"], "description": "Date precision. Default: 'unknown'" },
+                        "occurred_value": { "type": "string", "description": "Date string (null if unknown)" },
+                        "context": { "type": "object", "description": "Platform or environment details (e.g. {\"platform\": \"PC\", \"environment\": \"emulator\"})" },
+                        "request_id": { "type": "string", "description": "Client-generated idempotency key" }
+                    },
+                    "required": ["work_id"]
+                }
+            }),
+            json!({
+                "name": "update_experience",
+                "description": "[ContentWrite] Update an existing personal footprint (date, reflection note, context)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Experience ID to update" },
+                        "title": { "type": "string", "description": "Updated title" },
+                        "note": { "type": "string", "description": "Updated reflection note" },
+                        "occurred_precision": { "type": "string", "enum": ["unknown", "year", "month", "day", "instant"] },
+                        "occurred_value": { "type": "string", "description": "Updated occurred date string" },
+                        "context": { "type": "object", "description": "Updated context metadata" }
+                    },
+                    "required": ["id"]
+                }
+            }),
+            json!({
+                "name": "archive_experience",
+                "description": "[MetadataWrite] Archive an experience footprint (hidden from default timeline without destroying data)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Experience ID to archive" }
+                    },
+                    "required": ["id"]
+                }
             })
         ]
     }
@@ -704,7 +808,7 @@ impl McpServer {
         Ok(())
     }
 
-    fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
+    pub fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
         match name {
             // Read tools
             "search_assets" => {
@@ -1159,6 +1263,130 @@ impl McpServer {
                 } else {
                     serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
                 }
+            }
+
+            "list_experiences" => {
+                self.check_permission(McpPermissionLevel::ReadOnly, "list_experiences")?;
+                let subject_id = args.get("subject_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let event_type = args.get("event_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+                let filter = ExperienceFilter {
+                    subject_id,
+                    event_type,
+                    limit,
+                    ..Default::default()
+                };
+                let list = self.core.list_experiences(&filter).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&list).map_err(|e| e.to_string())
+            }
+
+            "get_experience" => {
+                self.check_permission(McpPermissionLevel::ReadOnly, "get_experience")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id parameter")?;
+                let exp = self.core.get_experience(id).map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Experience not found: {id}"))?;
+                let links = self.core.list_experience_links(id).unwrap_or_default();
+                let payload = json!({
+                    "experience": exp,
+                    "links": links,
+                });
+                serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
+            }
+
+            "record_experience" => {
+                self.check_permission(McpPermissionLevel::ContentWrite, "record_experience")?;
+                let subject_id = args.get("subject_id").and_then(|v| v.as_str()).ok_or("Missing subject_id")?;
+                let event_type = args.get("event_type").and_then(|v| v.as_str()).ok_or("Missing event_type")?;
+                let title = args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let note = args.get("note").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let precision = args.get("occurred_precision").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let value = args.get("occurred_value").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let context = args.get("context").cloned().unwrap_or(Value::Object(Default::default()));
+                let request_id = args.get("request_id").and_then(|v| v.as_str());
+
+                let mut exp = ExperienceEntry::new(subject_id, event_type);
+                exp.title = title;
+                exp.note = note;
+                exp.occurred_precision = precision.to_string();
+                exp.occurred_value = value;
+                exp.context_json = context;
+
+                let req_tuple = request_id.map(|rid| ("mcp", rid));
+                let created = self.core.record_experience("mcp", &exp, &[], req_tuple).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&created).map_err(|e| e.to_string())
+            }
+
+            "complete_work_with_experience" => {
+                self.check_permission(McpPermissionLevel::ContentWrite, "complete_work_with_experience")?;
+                let work_id = args.get("work_id").and_then(|v| v.as_str()).ok_or("Missing work_id")?;
+                let event_type = args.get("event_type").and_then(|v| v.as_str()).unwrap_or(experience_events::COMPLETED);
+                let title = args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let note = args.get("note").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let precision = args.get("occurred_precision").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let value = args.get("occurred_value").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let context = args.get("context").cloned().unwrap_or(Value::Object(Default::default()));
+                let request_id = args.get("request_id").and_then(|v| v.as_str());
+
+                let mut exp = ExperienceEntry::new(work_id, event_type);
+                exp.title = title;
+                exp.note = note;
+                exp.occurred_precision = precision.to_string();
+                exp.occurred_value = value;
+                exp.context_json = context;
+
+                let req_tuple = request_id.map(|rid| ("mcp", rid));
+                let (updated_work, created_exp) = self.core.complete_work_and_record_experience(
+                    "mcp",
+                    work_id,
+                    exp,
+                    &[],
+                    req_tuple,
+                ).map_err(|e| e.to_string())?;
+
+                let payload = json!({
+                    "work": updated_work,
+                    "experience": created_exp,
+                });
+                serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
+            }
+
+            "update_experience" => {
+                self.check_permission(McpPermissionLevel::ContentWrite, "update_experience")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id parameter")?;
+                let mut exp = self.core.get_experience(id).map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Experience not found: {id}"))?;
+
+                if let Some(t) = args.get("title").and_then(|v| v.as_str()) {
+                    exp.title = Some(t.to_string());
+                }
+                if let Some(n) = args.get("note").and_then(|v| v.as_str()) {
+                    exp.note = Some(n.to_string());
+                }
+                if let Some(p) = args.get("occurred_precision").and_then(|v| v.as_str()) {
+                    exp.occurred_precision = p.to_string();
+                }
+                if let Some(val) = args.get("occurred_value") {
+                    if val.is_null() {
+                        exp.occurred_value = None;
+                    } else if let Some(s) = val.as_str() {
+                        exp.occurred_value = Some(s.to_string());
+                    }
+                }
+                if let Some(ctx) = args.get("context") {
+                    if ctx.is_object() {
+                        exp.context_json = ctx.clone();
+                    }
+                }
+                self.core.update_experience("mcp", &exp).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&exp).map_err(|e| e.to_string())
+            }
+
+            "archive_experience" => {
+                self.check_permission(McpPermissionLevel::MetadataWrite, "archive_experience")?;
+                let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing id parameter")?;
+                let archived = self.core.archive_experience("mcp", id).map_err(|e| e.to_string())?;
+                Ok(json!({ "archived": archived, "id": id }).to_string())
             }
 
             _ => Err(format!("Unknown tool: {name}")),

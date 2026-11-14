@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use super::{Asset, Collection, Entity, ExternalReference, Memory, Relation, VaultInfo, VaultStats};
+use super::{
+    Asset, AssetLifecycle, AssetScanSuppression, Collection, Entity, ExperienceEntry,
+    ExperienceLink, ExternalReference, Memory, Relation, SourceRoot, VaultInfo, VaultStats,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultManifest {
@@ -16,6 +19,12 @@ pub struct VaultManifest {
     pub collections_count: usize,
     pub relations_count: usize,
     pub external_references_count: usize,
+    #[serde(default)]
+    pub experiences_count: usize,
+    #[serde(default)]
+    pub source_roots_count: usize,
+    #[serde(default)]
+    pub asset_suppressions_count: usize,
     pub checksums: HashMap<String, String>,
 }
 
@@ -28,6 +37,16 @@ pub struct VaultExportDump {
     pub collections: Vec<Collection>,
     pub relations: Vec<Relation>,
     pub external_references: Vec<ExternalReference>,
+    #[serde(default)]
+    pub experiences: Vec<ExperienceEntry>,
+    #[serde(default)]
+    pub experience_links: Vec<ExperienceLink>,
+    #[serde(default)]
+    pub source_roots: Vec<SourceRoot>,
+    #[serde(default)]
+    pub asset_lifecycles: Vec<AssetLifecycle>,
+    #[serde(default)]
+    pub asset_suppressions: Vec<AssetScanSuppression>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +64,12 @@ pub struct RestoreResult {
     pub restored_collections: usize,
     pub restored_relations: usize,
     pub restored_external_references: usize,
+    #[serde(default)]
+    pub restored_experiences: usize,
+    #[serde(default)]
+    pub restored_source_roots: usize,
+    #[serde(default)]
+    pub restored_asset_suppressions: usize,
     pub duration_ms: u64,
 }
 

@@ -20,6 +20,8 @@ pub trait VaultRepository:
     + BackupService
     + AuditService
     + ExternalReferenceService
+    + ExperienceService
+    + SourceRootService
     + Send
     + Sync
 {
@@ -36,6 +38,8 @@ impl<T> VaultRepository for T where
         + BackupService
         + AuditService
         + ExternalReferenceService
+        + ExperienceService
+        + SourceRootService
         + Send
         + Sync
 {
@@ -665,6 +669,8 @@ impl LoomaCore {
             }
         }
 
+        let experiences = self.list_experiences_for_work(entity_id).unwrap_or_default();
+
         Ok(Some(WorkSummary {
             entity,
             work_metadata,
@@ -673,6 +679,7 @@ impl LoomaCore {
             linked_memories,
             linked_collections,
             external_references,
+            experiences,
         }))
     }
 
@@ -1903,6 +1910,380 @@ impl LoomaCore {
             json!({ "cleaned_count": count }),
         )?;
         Ok(count)
+    }
+
+    // --- Experience / Footprints ---
+    pub fn record_experience(
+        &self,
+        actor: &str,
+        entry: &ExperienceEntry,
+        links: &[ExperienceLink],
+        request_id: Option<(&str, &str)>,
+    ) -> LoomaResult<ExperienceEntry> {
+        entry.validate()?;
+        for link in links {
+            link.validate()?;
+        }
+
+        // Validate subject exists
+        if self.get_entity(&entry.subject_id)?.is_none() {
+            return Err(LoomaError::NotFound(format!(
+                "Experience subject entity '{}' not found",
+                entry.subject_id
+            )));
+        }
+
+        let created = self.repo.create_experience(entry, links, request_id)?;
+
+        self.record_audit(
+            actor,
+            "experience.create",
+            "experience",
+            &created.id,
+            "success",
+            json!({
+                "subject_id": created.subject_id,
+                "event_type": created.event_type,
+                "occurred_precision": created.occurred_precision,
+                "occurred_value": created.occurred_value,
+            }),
+        )?;
+
+        self.emit_event(
+            actor,
+            DomainEvent::ExperienceCreated {
+                id: created.id.clone(),
+                subject_id: created.subject_id.clone(),
+                event_type: created.event_type.clone(),
+            },
+        );
+
+        Ok(created)
+    }
+
+    pub fn complete_work_and_record_experience(
+        &self,
+        actor: &str,
+        work_id: &str,
+        mut experience: ExperienceEntry,
+        links: &[ExperienceLink],
+        request_id: Option<(&str, &str)>,
+    ) -> LoomaResult<(Entity, ExperienceEntry)> {
+        experience.subject_type = "entity".to_string();
+        experience.subject_id = work_id.to_string();
+        if experience.event_type.trim().is_empty() {
+            experience.event_type = experience_events::COMPLETED.to_string();
+        }
+        experience.validate()?;
+
+        for link in links {
+            link.validate()?;
+        }
+
+        // Validate work entity exists and is a work
+        let entity = self.get_entity(work_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity '{work_id}' not found")))?;
+        if entity.as_work_metadata().is_none() && entity.entity_type != "work" && entity.properties.get("domain").and_then(|v| v.as_str()) != Some("work") {
+            return Err(LoomaError::Validation(format!(
+                "Entity '{work_id}' is of type '{}', expected a work entity",
+                entity.entity_type
+            )));
+        }
+
+        let audit = AuditLog {
+            id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            actor: actor.to_string(),
+            operation: "work.complete_with_experience".to_string(),
+            target_type: "work".to_string(),
+            target_id: work_id.to_string(),
+            result: "success".to_string(),
+            details: json!({
+                "experience_id": experience.id,
+                "event_type": experience.event_type,
+                "occurred_precision": experience.occurred_precision,
+                "occurred_value": experience.occurred_value,
+            }),
+        };
+
+        let (updated_work, created_exp) = self.repo.complete_work_and_record_experience(
+            work_id,
+            &experience,
+            links,
+            request_id,
+            &audit,
+        )?;
+
+        self.emit_event(
+            actor,
+            DomainEvent::EntityUpdated {
+                id: work_id.to_string(),
+            },
+        );
+        self.emit_event(
+            actor,
+            DomainEvent::ExperienceCreated {
+                id: created_exp.id.clone(),
+                subject_id: created_exp.subject_id.clone(),
+                event_type: created_exp.event_type.clone(),
+            },
+        );
+
+        Ok((updated_work, created_exp))
+    }
+
+    pub fn get_experience(&self, id: &str) -> LoomaResult<Option<ExperienceEntry>> {
+        self.repo.get_experience_by_id(id)
+    }
+
+    pub fn list_experiences(&self, filter: &ExperienceFilter) -> LoomaResult<Vec<ExperienceEntry>> {
+        self.repo.list_experiences(filter)
+    }
+
+    pub fn list_experiences_for_work(&self, work_id: &str) -> LoomaResult<Vec<ExperienceEntry>> {
+        self.repo.list_experiences(&ExperienceFilter {
+            subject_id: Some(work_id.to_string()),
+            ..Default::default()
+        })
+    }
+
+    pub fn update_experience(
+        &self,
+        actor: &str,
+        entry: &ExperienceEntry,
+    ) -> LoomaResult<()> {
+        entry.validate()?;
+        self.repo.update_experience(entry)?;
+        self.record_audit(
+            actor,
+            "experience.update",
+            "experience",
+            &entry.id,
+            "success",
+            json!({ "title": entry.title, "event_type": entry.event_type }),
+        )?;
+        self.emit_event(actor, DomainEvent::ExperienceUpdated { id: entry.id.clone() });
+        Ok(())
+    }
+
+    pub fn archive_experience(&self, actor: &str, id: &str) -> LoomaResult<bool> {
+        let archived = self.repo.archive_experience(id)?;
+        if archived {
+            self.record_audit(
+                actor,
+                "experience.archive",
+                "experience",
+                id,
+                "success",
+                json!({}),
+            )?;
+            self.emit_event(actor, DomainEvent::ExperienceArchived { id: id.to_string() });
+        }
+        Ok(archived)
+    }
+
+    pub fn list_experience_links(&self, experience_id: &str) -> LoomaResult<Vec<ExperienceLink>> {
+        self.repo.list_experience_links(experience_id)
+    }
+
+    pub fn add_experience_link(
+        &self,
+        actor: &str,
+        link: &ExperienceLink,
+    ) -> LoomaResult<()> {
+        link.validate()?;
+        self.repo.add_experience_link(link)?;
+        self.record_audit(
+            actor,
+            "experience.link",
+            "experience",
+            &link.experience_id,
+            "success",
+            json!({ "linked_type": link.linked_type, "linked_id": link.linked_id }),
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_experience_link(
+        &self,
+        actor: &str,
+        experience_id: &str,
+        linked_type: &str,
+        linked_id: &str,
+    ) -> LoomaResult<bool> {
+        let removed = self.repo.remove_experience_link(experience_id, linked_type, linked_id)?;
+        if removed {
+            self.record_audit(
+                actor,
+                "experience.unlink",
+                "experience",
+                experience_id,
+                "success",
+                json!({ "linked_type": linked_type, "linked_id": linked_id }),
+            )?;
+        }
+        Ok(removed)
+    }
+
+    // ==========================================
+    // SourceRoot & Reference Lifecycle Facade
+    // ==========================================
+
+    pub fn create_source_root(
+        &self,
+        actor: &str,
+        label: &str,
+        path: &str,
+    ) -> LoomaResult<SourceRoot> {
+        let norm_path = normalize_directory_path(path);
+        let root = SourceRoot::new(uuid::Uuid::new_v4().to_string(), label, norm_path);
+        let created = self.repo.create_source_root(&root)?;
+        self.record_audit(
+            actor,
+            "sourceroot.create",
+            "source_root",
+            &created.id,
+            "success",
+            json!({ "label": created.label, "path": created.path }),
+        )?;
+        self.event_bus.publish(crate::events::EventEnvelope::new(
+            actor,
+            crate::events::DomainEvent::SourceRootCreated {
+                id: created.id.clone(),
+                path: created.path.clone(),
+            },
+        ));
+        Ok(created)
+    }
+
+    pub fn get_source_root(&self, id: &str) -> LoomaResult<Option<SourceRoot>> {
+        self.repo.get_source_root(id)
+    }
+
+    pub fn list_source_roots(&self) -> LoomaResult<Vec<SourceRoot>> {
+        self.repo.list_source_roots()
+    }
+
+    pub fn rebind_source_root(
+        &self,
+        actor: &str,
+        id: &str,
+        new_path: &str,
+    ) -> LoomaResult<SourceRoot> {
+        let norm_path = normalize_directory_path(new_path);
+        let existing = self
+            .repo
+            .get_source_root(id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("SourceRoot '{id}' not found")))?;
+        let old_path = existing.path.clone();
+
+        let rebound = self.repo.rebind_source_root(id, &norm_path)?;
+        self.record_audit(
+            actor,
+            "sourceroot.rebind",
+            "source_root",
+            id,
+            "success",
+            json!({ "old_path": old_path, "new_path": norm_path }),
+        )?;
+        self.event_bus.publish(crate::events::EventEnvelope::new(
+            actor,
+            crate::events::DomainEvent::SourceRootRebound {
+                id: id.to_string(),
+                old_path,
+                new_path: norm_path,
+            },
+        ));
+        Ok(rebound)
+    }
+
+    pub fn inspect_source_root(&self, id: &str) -> LoomaResult<SourceRootInspection> {
+        self.repo.inspect_source_root(id)
+    }
+
+    pub fn archive_asset(&self, actor: &str, asset_id: &str) -> LoomaResult<()> {
+        self.repo.archive_asset(asset_id)?;
+        self.record_audit(
+            actor,
+            "asset.archive",
+            "asset",
+            asset_id,
+            "success",
+            json!({}),
+        )?;
+        self.event_bus.publish(crate::events::EventEnvelope::new(
+            actor,
+            crate::events::DomainEvent::AssetArchived {
+                id: asset_id.to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    pub fn unarchive_asset(&self, actor: &str, asset_id: &str) -> LoomaResult<()> {
+        self.repo.unarchive_asset(asset_id)?;
+        self.record_audit(
+            actor,
+            "asset.unarchive",
+            "asset",
+            asset_id,
+            "success",
+            json!({}),
+        )?;
+        self.event_bus.publish(crate::events::EventEnvelope::new(
+            actor,
+            crate::events::DomainEvent::AssetUnarchived {
+                id: asset_id.to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    pub fn untrack_asset(&self, actor: &str, asset_id: &str, reason: Option<&str>) -> LoomaResult<()> {
+        self.repo.untrack_asset(asset_id, reason)?;
+        self.record_audit(
+            actor,
+            "asset.untrack",
+            "asset",
+            asset_id,
+            "success",
+            json!({ "reason": reason }),
+        )?;
+        self.event_bus.publish(crate::events::EventEnvelope::new(
+            actor,
+            crate::events::DomainEvent::AssetUntracked {
+                id: asset_id.to_string(),
+                reason: reason.map(|s| s.to_string()),
+            },
+        ));
+        Ok(())
+    }
+
+    pub fn resume_tracking(&self, actor: &str, asset_id: &str) -> LoomaResult<()> {
+        self.repo.resume_tracking(asset_id)?;
+        self.record_audit(
+            actor,
+            "asset.resume_tracking",
+            "asset",
+            asset_id,
+            "success",
+            json!({}),
+        )?;
+        self.event_bus.publish(crate::events::EventEnvelope::new(
+            actor,
+            crate::events::DomainEvent::AssetTrackingResumed {
+                id: asset_id.to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    pub fn get_asset_lifecycle(&self, asset_id: &str) -> LoomaResult<Option<AssetLifecycle>> {
+        self.repo.get_asset_lifecycle(asset_id)
+    }
+
+    pub fn list_suppressions(&self, root_id: Option<&str>) -> LoomaResult<Vec<AssetScanSuppression>> {
+        self.repo.list_suppressions(root_id)
     }
 }
 

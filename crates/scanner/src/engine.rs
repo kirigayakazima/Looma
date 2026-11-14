@@ -61,6 +61,7 @@ impl Scanner {
         let mut new_assets = 0usize;
         let mut modified_assets = 0usize;
         let mut unchanged_assets = 0usize;
+        let mut suppressed_assets = 0usize;
         let mut errors = Vec::new();
 
         let mut walker = WalkDir::new(root).follow_links(options.follow_symlinks);
@@ -100,6 +101,23 @@ impl Scanner {
 
             let file_path = entry.path();
             let norm_path = normalize_path(file_path);
+
+            // Calculate relative path for suppression check
+            let rel_path = file_path
+                .strip_prefix(root)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/").trim_start_matches('/').to_string())
+                .unwrap_or_default();
+
+            if !rel_path.is_empty()
+                && options
+                    .suppressed_relative_paths
+                    .iter()
+                    .any(|s| s.trim_start_matches('/') == rel_path)
+            {
+                suppressed_assets += 1;
+                continue;
+            }
 
             let metadata = match entry.metadata() {
                 Ok(m) => m,
@@ -230,17 +248,32 @@ impl Scanner {
         }
 
         // Check for missing assets that previously belonged to this folder
+        // Section 9.4: Root completely scanned -> only then mark missing
+        // If scan had errors (partially failed), unvisited files must NOT be marked missing!
         let mut missing_assets = 0usize;
-        if let Ok(existing_in_dir) = service.list_assets_by_prefix(&root_str) {
-            for mut asset in existing_in_dir {
-                if let Some(ref p) = asset.path {
-                    if !Path::new(p).exists() && asset.status == AssetStatus::Active {
-                        asset.status = AssetStatus::Missing;
-                        asset.indexed_at = Utc::now();
-                        if let Err(e) = service.upsert_asset(&asset) {
-                            errors.push(format!("Failed to mark asset as missing {}: {e}", p));
-                        } else {
-                            missing_assets += 1;
+        if errors.is_empty() {
+            if let Ok(existing_in_dir) = service.list_assets_by_prefix(&root_str) {
+                for mut asset in existing_in_dir {
+                    if let Some(ref p) = asset.path {
+                        let rel = Path::new(p)
+                            .strip_prefix(root)
+                            .ok()
+                            .map(|rp| rp.to_string_lossy().replace('\\', "/").trim_start_matches('/').to_string())
+                            .unwrap_or_default();
+                        let is_suppressed = !rel.is_empty()
+                            && options
+                                .suppressed_relative_paths
+                                .iter()
+                                .any(|s| s.trim_start_matches('/') == rel);
+
+                        if !is_suppressed && !Path::new(p).exists() && asset.status == AssetStatus::Active {
+                            asset.status = AssetStatus::Missing;
+                            asset.indexed_at = Utc::now();
+                            if let Err(e) = service.upsert_asset(&asset) {
+                                errors.push(format!("Failed to mark asset as missing {}: {e}", p));
+                            } else {
+                                missing_assets += 1;
+                            }
                         }
                     }
                 }
@@ -268,6 +301,7 @@ impl Scanner {
             modified_assets,
             unchanged_assets,
             missing_assets,
+            suppressed_assets,
             errors,
         })
     }

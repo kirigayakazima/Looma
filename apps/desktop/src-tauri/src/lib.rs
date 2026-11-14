@@ -472,6 +472,76 @@ fn relocate_work_directory(
 }
 
 #[tauri::command]
+fn record_experience(
+    subject_id: String,
+    event_type: String,
+    title: Option<String>,
+    note: Option<String>,
+    occurred_precision: Option<String>,
+    occurred_value: Option<String>,
+    context_json: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<ExperienceEntry, String> {
+    let mut exp = ExperienceEntry::new(subject_id, event_type);
+    exp.title = title;
+    exp.note = note;
+    if let Some(p) = occurred_precision {
+        exp.occurred_precision = p;
+    }
+    exp.occurred_value = occurred_value;
+    if let Some(ctx) = context_json {
+        exp.context_json = ctx;
+    }
+
+    state.core.record_experience("desktop", &exp, &[], None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn complete_work_and_record_experience(
+    work_id: String,
+    event_type: Option<String>,
+    title: Option<String>,
+    note: Option<String>,
+    occurred_precision: Option<String>,
+    occurred_value: Option<String>,
+    context_json: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(Entity, ExperienceEntry), String> {
+    let mut exp = ExperienceEntry::new(&work_id, event_type.unwrap_or_else(|| experience_events::COMPLETED.to_string()));
+    exp.title = title;
+    exp.note = note;
+    if let Some(p) = occurred_precision {
+        exp.occurred_precision = p;
+    }
+    exp.occurred_value = occurred_value;
+    if let Some(ctx) = context_json {
+        exp.context_json = ctx;
+    }
+
+    state.core.complete_work_and_record_experience("desktop", &work_id, exp, &[], None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_experiences_for_work(
+    work_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ExperienceEntry>, String> {
+    state.core.list_experiences_for_work(&work_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn archive_experience(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    state.core.archive_experience("desktop", &id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn detect_game_candidates(
     root_path: String,
     state: State<'_, AppState>,
@@ -629,7 +699,11 @@ pub fn run() {
             link_work_directory,
             relocate_work_directory,
             detect_game_candidates,
-            open_external_url
+            open_external_url,
+            record_experience,
+            complete_work_and_record_experience,
+            list_experiences_for_work,
+            archive_experience
         ])
         .run(tauri::generate_context!())
     {

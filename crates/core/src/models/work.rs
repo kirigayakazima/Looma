@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{Asset, Collection, Entity, ExternalReference, Memory, Relation};
+use super::{Asset, Collection, Entity, ExperienceEntry, ExternalReference, Memory, Relation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -604,6 +604,8 @@ pub struct WorkSummary {
     pub linked_memories: Vec<Memory>,
     pub linked_collections: Vec<Collection>,
     pub external_references: Vec<ExternalReference>,
+    #[serde(default)]
+    pub experiences: Vec<ExperienceEntry>,
 }
 
 /// Machine-readable invariant violation code

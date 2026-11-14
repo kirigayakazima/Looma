@@ -2098,7 +2098,7 @@ fn test_v04_primary_write_path_consistency() {
     assert_eq!(count1, 1);
 
     // 2. Write via MCP create_external_reference with is_primary = true
-    let mcp = looma_mcp::McpServer::new(core.clone());
+    let mcp = looma_mcp::McpServer::with_permission(core.clone(), looma_mcp::McpPermissionLevel::ContentWrite);
     let mcp_call_create = mcp.handle_method(
         "tools/call",
         json!({

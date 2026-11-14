@@ -20,6 +20,7 @@ import {
   FolderSearch,
   Layers,
   AlertCircle,
+  Compass,
 } from 'lucide-react';
 import {
   Entity,
@@ -81,6 +82,17 @@ export const GamesView: React.FC<GamesViewProps> = ({
 
   // Link Asset Search
   const [assetSearch, setAssetSearch] = useState('');
+
+  // Experience Modal State
+  const [showExperienceModal, setShowExperienceModal] = useState(false);
+  const [expEventType, setExpEventType] = useState('completed');
+  const [expTitle, setExpTitle] = useState('');
+  const [expDate, setExpDate] = useState('');
+  const [expPrecision, setExpPrecision] = useState('day');
+  const [expPlatform, setExpPlatform] = useState('PC');
+  const [expNote, setExpNote] = useState('');
+  const [expSubmitting, setExpSubmitting] = useState(false);
+  const [expTargetGameId, setExpTargetGameId] = useState<string | null>(null);
 
   // Safe IPC invoke
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
@@ -158,6 +170,19 @@ export const GamesView: React.FC<GamesViewProps> = ({
 
   // Handle status update
   const handleUpdateStatus = async (gameId: string, newStatus: RecordStatus) => {
+    if (newStatus === 'completed') {
+      // Offer smooth footprint completion recording
+      setExpTargetGameId(gameId);
+      setExpEventType('completed');
+      setExpTitle('通关达成');
+      const today = new Date().toISOString().substring(0, 10);
+      setExpDate(today);
+      setExpPrecision('day');
+      setExpPlatform('PC');
+      setExpNote('');
+      setShowExperienceModal(true);
+      return;
+    }
     await safeInvoke('update_work_status', { id: gameId, status: newStatus });
     await loadGames();
     if (activeGameId === gameId) {
@@ -165,6 +190,92 @@ export const GamesView: React.FC<GamesViewProps> = ({
       if (updated) setActiveSummary(updated);
     }
     if (onRefreshAll) onRefreshAll();
+  };
+
+  const handleOpenExperienceModal = (targetGameId: string, defaultType = 'completed') => {
+    setExpTargetGameId(targetGameId);
+    setExpEventType(defaultType);
+    setExpTitle(defaultType === 'completed' ? '通关达成' : defaultType === 'replayed' ? '二周目通关' : defaultType === 'started' ? '入坑开始' : '');
+    const today = new Date().toISOString().substring(0, 10);
+    setExpDate(today);
+    setExpPrecision('day');
+    setExpPlatform('PC');
+    setExpNote('');
+    setShowExperienceModal(true);
+  };
+
+  const handleRecordExperience = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetId = expTargetGameId || activeGameId;
+    if (!targetId) return;
+    setExpSubmitting(true);
+    try {
+      const isCompletion = expEventType === 'completed';
+      const precision = expDate.trim() ? expPrecision : 'unknown';
+      const occurredValue = expDate.trim() ? expDate.trim() : null;
+      const contextJson = expPlatform.trim() ? { platform: expPlatform.trim() } : {};
+
+      if (isCompletion) {
+        await safeInvoke('complete_work_and_record_experience', {
+          workId: targetId,
+          eventType: expEventType,
+          title: expTitle.trim() || undefined,
+          note: expNote.trim() || undefined,
+          occurredPrecision: precision,
+          occurredValue: occurredValue,
+          contextJson: contextJson,
+        });
+        await loadGames();
+      } else {
+        await safeInvoke('record_experience', {
+          subjectId: targetId,
+          eventType: expEventType,
+          title: expTitle.trim() || undefined,
+          note: expNote.trim() || undefined,
+          occurredPrecision: precision,
+          occurredValue: occurredValue,
+          contextJson: contextJson,
+        });
+      }
+
+      setShowExperienceModal(false);
+      if (activeGameId === targetId) {
+        const updated = await safeInvoke<WorkSummary>('get_work_summary', { id: targetId });
+        if (updated) setActiveSummary(updated);
+      }
+      if (onRefreshAll) onRefreshAll();
+    } catch (err) {
+      alert(`记录足迹失败: ${err}`);
+    } finally {
+      setExpSubmitting(false);
+    }
+  };
+
+  const handleJustCompleteStatus = async () => {
+    const targetId = expTargetGameId || activeGameId;
+    if (!targetId) return;
+    setShowExperienceModal(false);
+    await safeInvoke('update_work_status', { id: targetId, status: 'completed' });
+    await loadGames();
+    if (activeGameId === targetId) {
+      const updated = await safeInvoke<WorkSummary>('get_work_summary', { id: targetId });
+      if (updated) setActiveSummary(updated);
+    }
+    if (onRefreshAll) onRefreshAll();
+  };
+
+  const handleArchiveExperience = async (expId: string) => {
+    if (!confirm('确定归档此条经历足迹吗？')) return;
+    try {
+      await safeInvoke('archive_experience', { id: expId });
+      if (activeGameId) {
+        const updated = await safeInvoke<WorkSummary>('get_work_summary', { id: activeGameId });
+        if (updated) setActiveSummary(updated);
+      }
+      if (onRefreshAll) onRefreshAll();
+    } catch (err) {
+      alert(`归档经历失败: ${err}`);
+    }
   };
 
   // Handle cover asset update
@@ -1003,6 +1114,95 @@ export const GamesView: React.FC<GamesViewProps> = ({
                   )}
                 </div>
 
+                {/* Personal Footprints & Experience (个人足迹与经历) */}
+                <div className="p-4 rounded-xl bg-neutral-950/70 border border-neutral-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
+                      <Compass className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>个人足迹与经历</span>
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-neutral-500">
+                        {activeSummary.experiences?.length || 0} 条
+                      </span>
+                      <button
+                        onClick={() => handleOpenExperienceModal(activeSummary.entity.id, 'completed')}
+                        className="text-[11px] text-emerald-400 hover:text-emerald-300 font-medium flex items-center gap-1 cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" />
+                        <span>记录足迹</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {!activeSummary.experiences || activeSummary.experiences.length === 0 ? (
+                    <div className="text-xs text-neutral-500 italic py-2">
+                      暂无经历足迹记录（通关、重温、入坑等），点击右上角记录
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {activeSummary.experiences.map((exp) => {
+                        const eventLabels: Record<string, { label: string; bg: string; text: string }> = {
+                          completed: { label: '已通关', bg: 'bg-emerald-500/10', text: 'text-emerald-400' },
+                          replayed: { label: '重温/多周目', bg: 'bg-sky-500/10', text: 'text-sky-400' },
+                          started: { label: '入坑开始', bg: 'bg-indigo-500/10', text: 'text-indigo-400' },
+                          dropped: { label: '弃坑/搁置', bg: 'bg-rose-500/10', text: 'text-rose-400' },
+                          milestone: { label: '里程碑', bg: 'bg-amber-500/10', text: 'text-amber-400' },
+                          note: { label: '游玩随记', bg: 'bg-purple-500/10', text: 'text-purple-400' },
+                        };
+                        const conf = eventLabels[exp.event_type] || {
+                          label: exp.event_type,
+                          bg: 'bg-neutral-800',
+                          text: 'text-neutral-300',
+                        };
+                        const platform = (exp.context_json as any)?.platform;
+
+                        return (
+                          <div
+                            key={exp.id}
+                            className="p-2.5 rounded-lg bg-neutral-900 border border-neutral-800 text-xs space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${conf.bg} ${conf.text}`}
+                                >
+                                  {conf.label}
+                                </span>
+                                {platform && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-neutral-800 text-neutral-400 font-mono">
+                                    {platform}
+                                  </span>
+                                )}
+                                <span className="font-medium text-neutral-200">
+                                  {exp.title || '（未命名）'}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] text-neutral-500 font-mono">
+                                  {exp.occurred_value || (exp.occurred_precision === 'unknown' ? '时间未知' : exp.created_at.substring(0, 10))}
+                                </span>
+                                <button
+                                  onClick={() => handleArchiveExperience(exp.id)}
+                                  className="text-neutral-600 hover:text-rose-400 p-0.5 transition-colors"
+                                  title="归档此经历"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </div>
+                            {exp.note && (
+                              <p className="text-neutral-400 text-[11px] leading-relaxed whitespace-pre-line">
+                                {exp.note}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
                 {/* Linked Memories / Notes */}
                 <div className="p-4 rounded-xl bg-neutral-950/70 border border-neutral-800 space-y-3">
                   <div className="flex items-center justify-between">
@@ -1415,6 +1615,163 @@ export const GamesView: React.FC<GamesViewProps> = ({
                   </div>
                 ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Experience & Footprint Modal */}
+      {showExperienceModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col">
+            <div className="p-5 border-b border-neutral-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-400">
+                  <Compass className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-white">记录个人经历与足迹</h3>
+                  <p className="text-xs text-neutral-400 mt-0.5">
+                    记载通关时间、多周目重温、游玩平台与专属回忆
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowExperienceModal(false)}
+                className="p-1 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleRecordExperience} className="p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-neutral-300 mb-1.5">
+                    经历类型 <span className="text-emerald-400">*</span>
+                  </label>
+                  <select
+                    value={expEventType}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setExpEventType(v);
+                      if (v === 'completed' && !expTitle) setExpTitle('通关达成');
+                      else if (v === 'replayed' && !expTitle) setExpTitle('二周目通关');
+                      else if (v === 'started' && !expTitle) setExpTitle('入坑开始');
+                    }}
+                    className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-xs text-neutral-100 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="completed">通关达成 (Completed)</option>
+                    <option value="replayed">重温 / 多周目 (Replayed)</option>
+                    <option value="started">入坑 / 开启游玩 (Started)</option>
+                    <option value="milestone">重要里程碑 (Milestone)</option>
+                    <option value="dropped">弃坑 / 搁置 (Dropped)</option>
+                    <option value="note">随手随记 (Note)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-300 mb-1.5">
+                    游玩平台 (Platform)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="例如: PC (Steam), Switch, PS5..."
+                    value={expPlatform}
+                    onChange={(e) => setExpPlatform(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-emerald-500"
+                  >
+                  </input>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-neutral-300 mb-1.5">
+                  足迹标题 (可选)
+                </label>
+                <input
+                  type="text"
+                  placeholder="例如: 全成就白金达成 / 困难难度真结局通关"
+                  value={expTitle}
+                  onChange={(e) => setExpTitle(e.target.value)}
+                  className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-neutral-300 mb-1.5">
+                    发生时间 (留空为未知)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="YYYY-MM-DD 或 YYYY-MM"
+                    value={expDate}
+                    onChange={(e) => setExpDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-neutral-300 mb-1.5">
+                    时间精度
+                  </label>
+                  <select
+                    value={expPrecision}
+                    onChange={(e) => setExpPrecision(e.target.value)}
+                    className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-xs text-neutral-100 focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="day">精确到天 (YYYY-MM-DD)</option>
+                    <option value="month">精确到月份 (YYYY-MM)</option>
+                    <option value="year">精确到年份 (YYYY)</option>
+                    <option value="unknown">未知时间</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-neutral-300 mb-1.5">
+                  手记与心得随笔 (可选)
+                </label>
+                <textarea
+                  rows={3}
+                  placeholder="记录通关感想、泪目瞬间、打法流派..."
+                  value={expNote}
+                  onChange={(e) => setExpNote(e.target.value)}
+                  className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-emerald-500 resize-none"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-between">
+                {expEventType === 'completed' ? (
+                  <button
+                    type="button"
+                    onClick={handleJustCompleteStatus}
+                    className="text-xs text-neutral-400 hover:text-neutral-200 underline cursor-pointer"
+                  >
+                    仅标记状态，暂不记足迹
+                  </button>
+                ) : (
+                  <div />
+                )}
+
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setShowExperienceModal(false)}
+                    className="px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-medium transition-colors"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={expSubmitting}
+                    className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-xs font-bold transition-all disabled:opacity-50 cursor-pointer"
+                  >
+                    {expSubmitting ? '保存中...' : expEventType === 'completed' ? '保存足迹并通关' : '保存经历足迹'}
+                  </button>
+                </div>
+              </div>
+            </form>
           </div>
         </div>
       )}
