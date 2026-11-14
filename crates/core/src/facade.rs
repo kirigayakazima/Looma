@@ -54,20 +54,73 @@ pub fn normalize_directory_path(raw: &str) -> String {
     if let Some(stripped) = normalized.strip_prefix("//?/") {
         normalized = stripped.to_string();
     }
-    // Remove duplicate slashes
-    while normalized.contains("//") {
-        normalized = normalized.replace("//", "/");
+    // Check if Windows UNC network path (starts with //)
+    let is_unc = normalized.starts_with("//");
+    let body = if is_unc {
+        &normalized[2..]
+    } else {
+        &normalized[..]
+    };
+
+    // Remove consecutive duplicate slashes in the path body
+    let mut cleaned = String::with_capacity(normalized.len());
+    let mut prev_slash = false;
+    for c in body.chars() {
+        if c == '/' {
+            if !prev_slash {
+                cleaned.push(c);
+                prev_slash = true;
+            }
+        } else {
+            cleaned.push(c);
+            prev_slash = false;
+        }
     }
+
+    let mut result = if is_unc {
+        format!("//{}", cleaned)
+    } else {
+        cleaned
+    };
+
     // Uppercase drive letter on Windows (e.g. "e:/..." -> "E:/...")
-    if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-        let drive = normalized[0..1].to_ascii_uppercase();
-        normalized = format!("{}{}", drive, &normalized[1..]);
+    if result.len() >= 2 && result.as_bytes()[1] == b':' {
+        let drive = result[0..1].to_ascii_uppercase();
+        result = format!("{}{}", drive, &result[1..]);
     }
-    // Trim trailing slash unless it's root like "E:/" or "/"
-    if normalized.len() > 3 && normalized.ends_with('/') {
-        normalized.pop();
+    // Trim trailing slash unless it's root like "E:/" or "/" or UNC root like "//server/share"
+    if !is_unc && result.len() > 3 && result.ends_with('/') {
+        result.pop();
+    } else if is_unc && result.len() > 2 && result.ends_with('/') {
+        result.pop();
     }
-    normalized
+    result
+}
+
+/// Checks if `child_path` is strictly equal to or inside `root_path`.
+/// Handles Windows case-insensitivity and segment boundaries correctly.
+pub fn is_path_under_root(child_path: &str, root_path: &str) -> bool {
+    let child_norm = normalize_directory_path(child_path);
+    let root_norm = normalize_directory_path(root_path);
+
+    #[cfg(target_os = "windows")]
+    let (c, r) = (child_norm.to_lowercase(), root_norm.to_lowercase());
+    #[cfg(not(target_os = "windows"))]
+    let (c, r) = (child_norm, root_norm);
+
+    if c == r {
+        return true;
+    }
+
+    if c.starts_with(&r) {
+        if r.ends_with('/') {
+            return true;
+        }
+        if c.as_bytes().get(r.len()) == Some(&b'/') {
+            return true;
+        }
+    }
+    false
 }
 
 /// The unified Core Application Facade for Looma.
@@ -76,6 +129,7 @@ pub fn normalize_directory_path(raw: &str) -> String {
 pub struct LoomaCore {
     repo: Arc<dyn VaultRepository>,
     event_bus: EventBus,
+    scan_engine: Arc<std::sync::RwLock<Option<Arc<dyn ScanEngine>>>>,
 }
 
 impl LoomaCore {
@@ -83,11 +137,25 @@ impl LoomaCore {
         Self {
             repo,
             event_bus: EventBus::new(),
+            scan_engine: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
     pub fn with_event_bus(repo: Arc<dyn VaultRepository>, event_bus: EventBus) -> Self {
-        Self { repo, event_bus }
+        Self {
+            repo,
+            event_bus,
+            scan_engine: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    pub fn with_scan_engine(self, engine: Arc<dyn ScanEngine>) -> Self {
+        *self.scan_engine.write().unwrap() = Some(engine);
+        self
+    }
+
+    pub fn set_scan_engine(&self, engine: Arc<dyn ScanEngine>) {
+        *self.scan_engine.write().unwrap() = Some(engine);
     }
 
     pub fn repository(&self) -> &Arc<dyn VaultRepository> {
@@ -1912,6 +1980,131 @@ impl LoomaCore {
         Ok(count)
     }
 
+    // --- Unified Directory Scan ---
+    pub fn scan_directory<F>(
+        &self,
+        path: &Path,
+        options: Option<ScanOptions>,
+        progress_cb: Option<F>,
+    ) -> LoomaResult<ScanSummary>
+    where
+        F: FnMut(ScanProgress) + Send + 'static,
+    {
+        let engine_opt = self.scan_engine.read().unwrap().clone();
+        let engine = engine_opt.ok_or_else(|| {
+            LoomaError::Internal("No ScanEngine registered with LoomaCore".to_string())
+        })?;
+
+        let norm_str = normalize_directory_path(&path.to_string_lossy());
+        let norm_path = std::path::PathBuf::from(&norm_str);
+        if !norm_path.exists() {
+            return Err(LoomaError::Validation(format!(
+                "Scan path does not exist: {}",
+                norm_str
+            )));
+        }
+
+        // 1. Resolve or create SourceRoot
+        let mut source_root = match self.repo.get_source_root_by_path(&norm_str)? {
+            Some(r) => r,
+            None => {
+                let label = norm_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&norm_str)
+                    .to_string();
+                let new_root = SourceRoot {
+                    id: format!("root_{}", &Uuid::new_v4().to_string()[..8]),
+                    label,
+                    path: norm_str.clone(),
+                    source_kind: "local".to_string(),
+                    enabled: true,
+                    state: "online".to_string(),
+                    last_successful_scan_at: None,
+                    last_seen_at: Some(Utc::now()),
+                    settings_json: serde_json::json!({}),
+                };
+                self.repo.create_source_root(&new_root)?
+            }
+        };
+
+        // 2. Load tombstone suppressions for this SourceRoot and merge into ScanOptions
+        let mut opts = options.unwrap_or_default();
+        let suppressions = self.repo.list_suppressions(Some(&source_root.id))?;
+        for sup in suppressions {
+            let rel = sup.relative_path.trim_start_matches('/').to_string();
+            if !opts.suppressed_relative_paths.iter().any(|p| p.eq_ignore_ascii_case(&rel)) {
+                opts.suppressed_relative_paths.push(rel);
+            }
+        }
+
+        // 3. Delegate to ScanEngine
+        let cb_box: Option<ScanProgressCallback> = progress_cb.map(|f| Box::new(f) as ScanProgressCallback);
+        let summary = engine.scan_directory(&*self.repo, &norm_path, &opts, cb_box)?;
+
+        // 4. Update SourceRoot scan stats & timestamps
+        source_root.last_successful_scan_at = Some(Utc::now());
+        source_root.last_seen_at = Some(Utc::now());
+        source_root.state = "online".to_string();
+        self.repo.update_source_root(&source_root)?;
+
+        // 5. Ensure asset_lifecycle records are linked to this SourceRoot for indexed assets
+        let assets_under_root = self.repo.list_assets_by_prefix(&norm_str)?;
+        for asset in assets_under_root {
+            if let Some(ref p) = asset.path {
+                let norm_asset_p = normalize_directory_path(p);
+                let rel = if norm_asset_p.len() > norm_str.len() {
+                    norm_asset_p[norm_str.len()..].trim_start_matches('/').to_string()
+                } else {
+                    String::new()
+                };
+
+                // Check existing lifecycle
+                if let Ok(Some(mut existing_lc)) = self.repo.get_asset_lifecycle(&asset.id) {
+                    if existing_lc.root_id.is_none() || existing_lc.relative_path.is_none() {
+                        existing_lc.root_id = Some(source_root.id.clone());
+                        existing_lc.relative_path = Some(rel);
+                    }
+                    existing_lc.availability = "online".to_string();
+                    existing_lc.last_verified_at = Some(Utc::now());
+                    let _ = self.repo.set_asset_lifecycle(&existing_lc);
+                } else {
+                    let new_lc = AssetLifecycle {
+                        asset_id: asset.id.clone(),
+                        root_id: Some(source_root.id.clone()),
+                        relative_path: Some(rel),
+                        availability: "online".to_string(),
+                        visibility: "active".to_string(),
+                        tracking: "tracked".to_string(),
+                        last_verified_at: Some(Utc::now()),
+                        untracked_at: None,
+                        untracked_reason: None,
+                    };
+                    let _ = self.repo.set_asset_lifecycle(&new_lc);
+                }
+            }
+        }
+
+        // 6. Record audit log
+        self.record_audit(
+            "system",
+            "asset.scan",
+            "source_root",
+            &source_root.id,
+            "success",
+            serde_json::json!({
+                "path": norm_str,
+                "total": summary.total_scanned,
+                "new": summary.new_assets,
+                "modified": summary.modified_assets,
+                "suppressed": summary.suppressed_assets,
+                "duration_ms": summary.duration_ms,
+            }),
+        )?;
+
+        Ok(summary)
+    }
+
     // --- Experience / Footprints ---
     pub fn record_experience(
         &self,
@@ -2284,6 +2477,14 @@ impl LoomaCore {
 
     pub fn list_suppressions(&self, root_id: Option<&str>) -> LoomaResult<Vec<AssetScanSuppression>> {
         self.repo.list_suppressions(root_id)
+    }
+
+    pub fn is_asset_suppressed(&self, root_id: &str, relative_path: &str) -> LoomaResult<bool> {
+        self.repo.is_asset_suppressed(root_id, relative_path)
+    }
+
+    pub fn add_suppression(&self, root_id: &str, relative_path: &str, reason: Option<&str>) -> LoomaResult<()> {
+        self.repo.add_suppression(root_id, relative_path, reason)
     }
 }
 

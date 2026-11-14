@@ -146,5 +146,16 @@ pub trait SourceRootService: Send + Sync {
     fn remove_suppression(&self, root_id: &str, relative_path: &str) -> LoomaResult<()>;
 }
 
+pub type ScanProgressCallback = Box<dyn FnMut(crate::models::ScanProgress) + Send>;
+
+pub trait ScanEngine: Send + Sync {
+    fn scan_directory(
+        &self,
+        service: &dyn AssetService,
+        root: &std::path::Path,
+        options: &crate::models::ScanOptions,
+        progress_cb: Option<ScanProgressCallback>,
+    ) -> LoomaResult<crate::models::ScanSummary>;
+}
 
 

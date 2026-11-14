@@ -454,7 +454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("======================================================\n");
 
     let db = LoomaDb::open(&vault_path)?;
-    let core = LoomaCore::new(Arc::new(db));
+    let core = LoomaCore::new(Arc::new(db)).with_scan_engine(Arc::new(Scanner));
 
     match cli.command {
         Commands::Status => {
@@ -477,11 +477,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 compute_hash: args.hash,
                 ..Default::default()
             };
-            let summary = Scanner::scan_directory(
-                &core,
+            let summary = core.scan_directory(
                 &args.path,
-                &options,
-                Some(|prog: looma_scanner::ScanProgress| {
+                Some(options),
+                Some(|prog: looma_core::models::ScanProgress| {
                     print!(
                         "\rDiscovered: {} | New: {} | Modified: {} | Unchanged: {}",
                         prog.total_discovered,
@@ -499,6 +498,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  Updated:         {}", summary.modified_assets);
             println!("  Unchanged:       {}", summary.unchanged_assets);
             println!("  Missing/deleted: {}", summary.missing_assets);
+            println!("  Suppressed:      {}", summary.suppressed_assets);
         }
 
         Commands::Search(args) => {

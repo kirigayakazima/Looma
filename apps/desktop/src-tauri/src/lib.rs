@@ -68,7 +68,7 @@ async fn scan_directory(
         let progress_cb = move |progress: ScanProgress| {
             let _ = app_handle.emit("scan-progress", &progress);
         };
-        Scanner::scan_directory(&core, &root, &options, Some(progress_cb))
+        core.scan_directory(&root, Some(options), Some(progress_cb))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -639,7 +639,7 @@ pub fn run() {
             panic!("{}", msg);
         }
     };
-    let core = LoomaCore::new(Arc::new(db));
+    let core = LoomaCore::new(Arc::new(db)).with_scan_engine(Arc::new(Scanner));
 
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

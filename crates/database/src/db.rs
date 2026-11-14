@@ -1776,6 +1776,8 @@ impl TimelineService for LoomaDb {
                     "event_type": event_type,
                     "occurred_precision": precision,
                     "occurred_value": occurred_val,
+                    "created_at": created_str,
+                    "is_occurred_time_unknown": precision == "unknown",
                     "context": context,
                 });
 
@@ -1826,9 +1828,16 @@ impl BackupService for LoomaDb {
         let suppressions = self.list_suppressions(None).unwrap_or_default();
 
         let conn = self.conn.lock();
+        // Checkpoint WAL to flush all transaction pages to disk before checksum computation
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+
         let relations_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM relations", [], |r| r.get(0))
             .unwrap_or(0);
+
+        let schema_version: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version), 4) FROM _schema_migrations", [], |r| r.get(0))
+            .unwrap_or(4);
 
         let mut checksums = std::collections::HashMap::new();
         if self.db_path.exists() {
@@ -1842,7 +1851,7 @@ impl BackupService for LoomaDb {
 
         Ok(VaultManifest {
             manifest_version: "2.0.0".to_string(),
-            schema_version: 2,
+            schema_version: schema_version as u32,
             created_at: Utc::now(),
             vault_info,
             stats,
@@ -2018,7 +2027,8 @@ impl BackupService for LoomaDb {
                 mem.recorded_at.to_rfc3339(),
                 mem.content
             );
-            std::fs::write(memories_dir.join(filename), md_content).ok();
+            std::fs::write(memories_dir.join(filename), md_content)
+                .map_err(|e| LoomaError::Vault(format!("Failed to write memory export file: {e}")))?;
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -2046,9 +2056,33 @@ impl BackupService for LoomaDb {
             )));
         }
 
-        let dump_str = std::fs::read_to_string(&dump_path)
+        let dump_bytes = std::fs::read(&dump_path)
             .map_err(|e| LoomaError::Vault(format!("Failed to read vault_dump.json: {e}")))?;
-        let dump: VaultExportDump = serde_json::from_str(&dump_str)
+
+        // Verify SHA-256 against manifest.json if present
+        let manifest_path = target_dir.join("manifest.json");
+        if manifest_path.exists() {
+            let manifest_str = std::fs::read_to_string(&manifest_path)
+                .map_err(|e| LoomaError::Vault(format!("Failed to read manifest.json: {e}")))?;
+            let manifest: VaultManifest = serde_json::from_str(&manifest_str)
+                .map_err(LoomaError::Serialization)?;
+
+            if let Some(expected_checksum) = manifest.checksums.get("vault_dump.json") {
+                use sha2::{Sha256, Digest};
+                let mut hasher = Sha256::new();
+                hasher.update(&dump_bytes);
+                let actual_checksum = format!("{:x}", hasher.finalize());
+
+                if !actual_checksum.eq_ignore_ascii_case(expected_checksum) {
+                    return Err(LoomaError::Validation(format!(
+                        "Backup archive corrupted: vault_dump.json checksum mismatch (expected {}, found {})",
+                        expected_checksum, actual_checksum
+                    )));
+                }
+            }
+        }
+
+        let dump: VaultExportDump = serde_json::from_slice(&dump_bytes)
             .map_err(LoomaError::Serialization)?;
 
         let mut restored_assets = 0;
@@ -2090,47 +2124,47 @@ impl BackupService for LoomaDb {
         }
 
         for relation in dump.relations {
-            let _ = self.create_relation(&relation);
+            self.create_relation(&relation)?;
             restored_relations += 1;
         }
 
         for ext_ref in dump.external_references {
             if self.get_external_reference_by_id(&ext_ref.id)?.is_some() {
-                let _ = self.update_external_reference(&ext_ref);
+                self.update_external_reference(&ext_ref)?;
             } else {
-                let _ = self.create_external_reference(&ext_ref);
+                self.create_external_reference(&ext_ref)?;
             }
             restored_external_references += 1;
         }
 
         for exp in dump.experiences {
             if self.get_experience_by_id(&exp.id)?.is_some() {
-                let _ = self.update_experience(&exp);
+                self.update_experience(&exp)?;
             } else {
-                let _ = self.create_experience(&exp, &[], None);
+                self.create_experience(&exp, &[], None)?;
             }
             restored_experiences += 1;
         }
 
         for link in dump.experience_links {
-            let _ = self.add_experience_link(&link);
+            self.add_experience_link(&link)?;
         }
 
         let mut restored_source_roots = 0;
         for root in dump.source_roots {
             if self.get_source_root(&root.id)?.is_none() {
-                let _ = self.create_source_root(&root);
+                self.create_source_root(&root)?;
                 restored_source_roots += 1;
             }
         }
 
         for lc in dump.asset_lifecycles {
-            let _ = self.set_asset_lifecycle(&lc);
+            self.set_asset_lifecycle(&lc)?;
         }
 
         let mut restored_asset_suppressions = 0;
         for sup in dump.asset_suppressions {
-            let _ = self.add_suppression(&sup.root_id, &sup.relative_path, sup.reason.as_deref());
+            self.add_suppression(&sup.root_id, &sup.relative_path, sup.reason.as_deref())?;
             restored_asset_suppressions += 1;
         }
 
@@ -2152,12 +2186,15 @@ impl BackupService for LoomaDb {
 
     fn doctor_inspect(&self) -> LoomaResult<VaultDoctorReport> {
         let roots = self.list_source_roots().unwrap_or_default();
-        let mut offline_root_prefixes = Vec::new();
-        for root in &roots {
+        let mut offline_roots: Vec<SourceRoot> = Vec::new();
+        let mut root_map: std::collections::HashMap<String, SourceRoot> = std::collections::HashMap::new();
+        for root in roots {
             let p = Path::new(&root.path);
-            if !p.exists() || !p.is_dir() {
-                offline_root_prefixes.push(root.path.trim_end_matches('/').trim_end_matches('\\').to_string());
+            let is_offline = !p.exists() || !p.is_dir() || root.state == "offline";
+            if is_offline {
+                offline_roots.push(root.clone());
             }
+            root_map.insert(root.id.clone(), root);
         }
 
         let assets = self.query_assets(&AssetFilter::default())?;
@@ -2167,15 +2204,37 @@ impl BackupService for LoomaDb {
 
         for asset in assets {
             if let Some(ref p) = asset.path {
-                let norm_p = p.replace('\\', "/");
-                let is_under_offline_root = offline_root_prefixes.iter().any(|prefix| {
-                    let norm_prefix = prefix.replace('\\', "/");
-                    norm_p.starts_with(&norm_prefix)
-                });
-
                 if Path::new(p).exists() {
                     active_assets += 1;
-                } else if is_under_offline_root {
+                    continue;
+                }
+
+                // If path does not exist on disk, determine if it is protected under an offline SourceRoot
+                let mut is_protected_offline = false;
+
+                // 1. Check direct lifecycle root association
+                if let Ok(Some(lc)) = self.get_asset_lifecycle(&asset.id) {
+                    if let Some(ref rid) = lc.root_id {
+                        if let Some(root) = root_map.get(rid) {
+                            let root_p = Path::new(&root.path);
+                            if !root_p.exists() || !root_p.is_dir() || root.state == "offline" {
+                                is_protected_offline = true;
+                            }
+                        }
+                    }
+                }
+
+                // 2. Fallback for unlinked assets: use boundary-safe & case-insensitive root check
+                if !is_protected_offline {
+                    for off_root in &offline_roots {
+                        if looma_core::facade::is_path_under_root(p, &off_root.path) {
+                            is_protected_offline = true;
+                            break;
+                        }
+                    }
+                }
+
+                if is_protected_offline {
                     // Drive or root is offline; do NOT treat as missing per Section 9.4 and T09!
                     active_assets += 1;
                 } else {
@@ -3430,10 +3489,11 @@ impl SourceRootService for LoomaDb {
             } else {
                 format!("{new_clean}/{rel}")
             };
-            let _ = tx.execute("UPDATE assets SET path = ?1 WHERE id = ?2", params![full_new, aid]);
+            tx.execute("UPDATE assets SET path = ?1 WHERE id = ?2", params![full_new, aid])
+                .map_err(|e| LoomaError::Database(e.to_string()))?;
             let file_exists = Path::new(&full_new).exists();
             let avail = if file_exists { asset_availability::ONLINE } else { asset_availability::UNCHECKED };
-            let _ = tx.execute(
+            tx.execute(
                 "INSERT INTO asset_lifecycle (asset_id, root_id, relative_path, availability, visibility, tracking, last_verified_at)
                  VALUES (?1, ?2, ?3, ?4, 'active', 'tracked', ?5)
                  ON CONFLICT(asset_id) DO UPDATE SET
@@ -3442,7 +3502,7 @@ impl SourceRootService for LoomaDb {
                    availability = excluded.availability,
                    last_verified_at = excluded.last_verified_at",
                 params![aid, id, rel, avail, if file_exists { Some(&now_str) } else { None }],
-            );
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
         }
 
         tx.commit().map_err(|e| LoomaError::Database(e.to_string()))?;

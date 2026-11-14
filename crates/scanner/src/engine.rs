@@ -23,13 +23,7 @@ fn is_ignored_directory(name: &str) -> bool {
 
 /// Normalizes path string for consistent database storage across platforms.
 pub fn normalize_path(path: &Path) -> String {
-    let s = path.to_string_lossy().to_string();
-    // Strip Windows extended-length prefix \\?\ if present
-    if let Some(stripped) = s.strip_prefix(r"\\?\") {
-        stripped.to_string()
-    } else {
-        s
-    }
+    looma_core::facade::normalize_directory_path(&path.to_string_lossy())
 }
 
 /// The main filesystem scanner for Looma.
@@ -44,7 +38,7 @@ impl Scanner {
         mut progress_cb: Option<F>,
     ) -> LoomaResult<ScanSummary>
     where
-        S: AssetService,
+        S: AssetService + ?Sized,
         F: FnMut(ScanProgress),
     {
         if !root.exists() {
@@ -113,7 +107,7 @@ impl Scanner {
                 && options
                     .suppressed_relative_paths
                     .iter()
-                    .any(|s| s.trim_start_matches('/') == rel_path)
+                    .any(|s| s.trim_start_matches('/').eq_ignore_ascii_case(&rel_path))
             {
                 suppressed_assets += 1;
                 continue;
@@ -150,6 +144,9 @@ impl Scanner {
 
                     if same_size && same_mtime && existing.status == AssetStatus::Active {
                         unchanged_assets += 1;
+                    } else if same_size && same_mtime && existing.status == AssetStatus::Archived {
+                        // Preserved archived status per lifecycle invariant
+                        unchanged_assets += 1;
                     } else {
                         // File modified or restored from missing
                         let (kind, mime) = classify_file(file_path);
@@ -171,7 +168,11 @@ impl Scanner {
                         existing.size = Some(file_size);
                         existing.hash = hash;
                         existing.mime_type = mime;
-                        existing.status = AssetStatus::Active;
+                        existing.status = if existing.status == AssetStatus::Archived {
+                            AssetStatus::Archived
+                        } else {
+                            AssetStatus::Active
+                        };
                         existing.modified_at = mtime;
                         existing.indexed_at = Utc::now();
 
@@ -306,3 +307,17 @@ impl Scanner {
         })
     }
 }
+
+impl looma_core::services::ScanEngine for Scanner {
+    fn scan_directory(
+        &self,
+        service: &dyn AssetService,
+        root: &Path,
+        options: &ScanOptions,
+        progress_cb: Option<looma_core::services::ScanProgressCallback>,
+    ) -> LoomaResult<ScanSummary> {
+        let cb = progress_cb.map(|mut f| move |p: ScanProgress| f(p));
+        Scanner::scan_directory(service, root, options, cb)
+    }
+}
+
