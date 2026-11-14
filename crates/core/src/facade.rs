@@ -123,6 +123,34 @@ pub fn is_path_under_root(child_path: &str, root_path: &str) -> bool {
     false
 }
 
+/// Computes the relative subpath of `target_path` within `base_path`.
+/// Returns `Some(relative_path)` if `target_path` is strictly equal to or inside `base_path`,
+/// or `None` otherwise. Handles Windows case-insensitivity and path segment boundaries.
+pub fn compute_relative_subpath(base_path: &str, target_path: &str) -> Option<String> {
+    let base_norm = normalize_directory_path(base_path);
+    let target_norm = normalize_directory_path(target_path);
+
+    #[cfg(target_os = "windows")]
+    let matches = target_norm.to_lowercase().starts_with(&base_norm.to_lowercase());
+    #[cfg(not(target_os = "windows"))]
+    let matches = target_norm.starts_with(&base_norm);
+
+    if !matches {
+        return None;
+    }
+
+    if target_norm.len() == base_norm.len() {
+        return Some(String::new());
+    }
+
+    let remainder = &target_norm[base_norm.len()..];
+    if remainder.starts_with('/') {
+        Some(remainder.trim_start_matches('/').to_string())
+    } else {
+        None
+    }
+}
+
 /// The unified Core Application Facade for Looma.
 /// Desktop, CLI, and MCP MUST interact with this facade instead of directly manipulating database or internal state.
 #[derive(Clone)]
@@ -2004,10 +2032,28 @@ impl LoomaCore {
             )));
         }
 
-        // 1. Resolve or create SourceRoot
-        let mut source_root = match self.repo.get_source_root_by_path(&norm_str)? {
-            Some(r) => r,
-            None => {
+        // 1. Resolve or inherit SourceRoot
+        let all_roots = self.repo.list_source_roots()?;
+        let exact_root = all_roots.iter().find(|r| {
+            #[cfg(target_os = "windows")]
+            { normalize_directory_path(&r.path).eq_ignore_ascii_case(&norm_str) }
+            #[cfg(not(target_os = "windows"))]
+            { normalize_directory_path(&r.path) == norm_str }
+        }).cloned();
+
+        let mut source_root = if let Some(r) = exact_root {
+            r
+        } else {
+            // Check if norm_str is under an existing registered SourceRoot (deepest/longest ancestor)
+            let ancestor_root = all_roots
+                .iter()
+                .filter(|r| is_path_under_root(&norm_str, &r.path))
+                .max_by_key(|r| r.path.len())
+                .cloned();
+
+            if let Some(parent) = ancestor_root {
+                parent
+            } else {
                 let label = norm_path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -2028,13 +2074,31 @@ impl LoomaCore {
             }
         };
 
-        // 2. Load tombstone suppressions for this SourceRoot and merge into ScanOptions
+        // 2. Load and inherit tombstone suppressions for this SourceRoot and all ancestor roots
         let mut opts = options.unwrap_or_default();
-        let suppressions = self.repo.list_suppressions(Some(&source_root.id))?;
-        for sup in suppressions {
-            let rel = sup.relative_path.trim_start_matches('/').to_string();
-            if !opts.suppressed_relative_paths.iter().any(|p| p.eq_ignore_ascii_case(&rel)) {
-                opts.suppressed_relative_paths.push(rel);
+        let mut candidate_roots = vec![source_root.clone()];
+        for r in &all_roots {
+            if is_path_under_root(&norm_str, &r.path) && r.id != source_root.id {
+                candidate_roots.push(r.clone());
+            }
+        }
+
+        for root in &candidate_roots {
+            let suppressions = self.repo.list_suppressions(Some(&root.id))?;
+            let root_norm = normalize_directory_path(&root.path);
+            for sup in suppressions {
+                let clean_rel = sup.relative_path.trim_start_matches('/').trim_start_matches('\\');
+                let full_sup_path = format!("{}/{}", root_norm.trim_end_matches('/'), clean_rel);
+                if let Some(rel_to_scan) = compute_relative_subpath(&norm_str, &full_sup_path) {
+                    let target_rel = if rel_to_scan.is_empty() {
+                        ".".to_string()
+                    } else {
+                        rel_to_scan
+                    };
+                    if !opts.suppressed_relative_paths.iter().any(|p| p.eq_ignore_ascii_case(&target_rel)) {
+                        opts.suppressed_relative_paths.push(target_rel);
+                    }
+                }
             }
         }
 
@@ -2053,21 +2117,18 @@ impl LoomaCore {
         for asset in assets_under_root {
             if let Some(ref p) = asset.path {
                 let norm_asset_p = normalize_directory_path(p);
-                let rel = if norm_asset_p.len() > norm_str.len() {
-                    norm_asset_p[norm_str.len()..].trim_start_matches('/').to_string()
-                } else {
-                    String::new()
-                };
+                let rel = compute_relative_subpath(&source_root.path, &norm_asset_p)
+                    .unwrap_or_else(|| norm_asset_p.clone());
 
-                // Check existing lifecycle
-                if let Ok(Some(mut existing_lc)) = self.repo.get_asset_lifecycle(&asset.id) {
+                let existing_lc_opt = self.repo.get_asset_lifecycle(&asset.id)?;
+                if let Some(mut existing_lc) = existing_lc_opt {
                     if existing_lc.root_id.is_none() || existing_lc.relative_path.is_none() {
                         existing_lc.root_id = Some(source_root.id.clone());
                         existing_lc.relative_path = Some(rel);
                     }
                     existing_lc.availability = "online".to_string();
                     existing_lc.last_verified_at = Some(Utc::now());
-                    let _ = self.repo.set_asset_lifecycle(&existing_lc);
+                    self.repo.set_asset_lifecycle(&existing_lc)?;
                 } else {
                     let new_lc = AssetLifecycle {
                         asset_id: asset.id.clone(),
@@ -2080,7 +2141,7 @@ impl LoomaCore {
                         untracked_at: None,
                         untracked_reason: None,
                     };
-                    let _ = self.repo.set_asset_lifecycle(&new_lc);
+                    self.repo.set_asset_lifecycle(&new_lc)?;
                 }
             }
         }

@@ -116,3 +116,134 @@ fn test_untrack_tombstone_scan_loop_and_lifecycle_invariants() {
         .expect("Fourth scan must succeed");
     assert_eq!(summary4.suppressed_assets, 1, "Only patch.bin is suppressed now");
 }
+
+#[test]
+fn test_subdirectory_scan_inherits_parent_tombstones_and_boundary_isolation() {
+    let vault_dir = tempdir().unwrap();
+    let db = Arc::new(LoomaDb::open(vault_dir.path()).unwrap());
+    let scanner = Arc::new(Scanner);
+    let core = LoomaCore::new(db.clone()).with_scan_engine(scanner.clone());
+
+    // 1. Directory layout:
+    // base_dir/
+    //   Games/
+    //     Bloodborne/
+    //       ebitas.exe   (to be untracked on Games)
+    //       normal.bin   (tracked)
+    //   GamesBackup/
+    //     backup.iso     (should never match Games prefix)
+    let base_dir = tempdir().unwrap();
+    let games_dir = base_dir.path().join("Games");
+    let games_backup_dir = base_dir.path().join("GamesBackup");
+    let bloodborne_dir = games_dir.join("Bloodborne");
+
+    fs::create_dir_all(&bloodborne_dir).unwrap();
+    fs::create_dir_all(&games_backup_dir).unwrap();
+
+    let ebitas_file = bloodborne_dir.join("ebitas.exe");
+    let normal_file = bloodborne_dir.join("normal.bin");
+    let backup_file = games_backup_dir.join("backup.iso");
+
+    fs::write(&ebitas_file, b"EBITAS_DATA").unwrap();
+    fs::write(&normal_file, b"NORMAL_DATA").unwrap();
+    fs::write(&backup_file, b"BACKUP_DATA").unwrap();
+
+    // 2. Register Games as a registered SourceRoot
+    let games_norm = looma_core::facade::normalize_directory_path(&games_dir.to_string_lossy());
+    let root = core
+        .create_source_root("test", "My Games", &games_norm)
+        .expect("Create parent SourceRoot must succeed");
+
+    // Add tombstone suppression on parent SourceRoot for subfolder path: "Bloodborne/ebitas.exe"
+    core.add_suppression(&root.id, "Bloodborne/ebitas.exe", Some("Untracked secret"))
+        .expect("Add suppression on parent root must succeed");
+
+    // 3. Scan ONLY the subdirectory Bloodborne
+    let sub_summary = core
+        .scan_directory(&bloodborne_dir, None, None::<fn(ScanProgress)>)
+        .expect("Subdirectory scan must succeed");
+
+    // Proves: Tombstone from parent SourceRoot ("Bloodborne/ebitas.exe") was transformed to "ebitas.exe"
+    // and successfully applied during the subfolder scan!
+    assert_eq!(sub_summary.new_assets, 1, "Only normal.bin should be newly indexed");
+    assert_eq!(sub_summary.suppressed_assets, 1, "ebitas.exe must be suppressed via inherited tombstone!");
+
+    // Verify ebitas.exe was NEVER indexed in assets table
+    let ebitas_norm = looma_core::facade::normalize_directory_path(&ebitas_file.to_string_lossy());
+    assert!(
+        core.get_asset_by_path(&ebitas_norm).unwrap().is_none(),
+        "Suppressed file must not exist in assets index"
+    );
+
+    // Verify normal.bin was indexed and correctly linked to parent SourceRoot
+    let normal_norm = looma_core::facade::normalize_directory_path(&normal_file.to_string_lossy());
+    let normal_asset = core.get_asset_by_path(&normal_norm).unwrap().expect("normal.bin must exist");
+    let normal_lc = core.get_asset_lifecycle(&normal_asset.id).unwrap().expect("lifecycle must exist");
+    assert_eq!(normal_lc.root_id.as_deref(), Some(root.id.as_str()), "Asset in subfolder must inherit parent SourceRoot ID");
+    assert_eq!(normal_lc.relative_path.as_deref(), Some("Bloodborne/normal.bin"), "Relative path must be relative to parent SourceRoot");
+
+    // Proves: Direct subfolder scan did not fragment or create a duplicate SourceRoot
+    let all_roots = core.list_source_roots().unwrap();
+    assert_eq!(all_roots.len(), 1, "Scanning subdirectory of existing root must not create duplicate root");
+
+    // 4. Test boundary isolation between Games and GamesBackup
+    // Scan GamesBackup to index its file
+    let backup_summary = core
+        .scan_directory(&games_backup_dir, None, None::<fn(ScanProgress)>)
+        .expect("GamesBackup scan must succeed");
+    assert_eq!(backup_summary.new_assets, 1);
+
+    // Query list_assets_by_prefix for Games: MUST NOT contain GamesBackup/backup.iso
+    let games_assets = core.list_assets_by_prefix(&games_norm).unwrap();
+    assert_eq!(games_assets.len(), 1, "Only normal.bin should match Games prefix");
+    assert_eq!(games_assets[0].id, normal_asset.id);
+    for a in &games_assets {
+        let p = a.path.as_deref().unwrap_or("");
+        assert!(
+            !p.contains("GamesBackup"),
+            "Critical prefix boundary failure: GamesBackup asset leaked into Games query! Path: {p}"
+        );
+    }
+}
+
+#[test]
+fn test_scan_directory_propagates_lifecycle_persistence_error() {
+    let vault_dir = tempdir().unwrap();
+    let db = Arc::new(LoomaDb::open(vault_dir.path()).unwrap());
+    let scanner = Arc::new(Scanner);
+    let core = LoomaCore::new(db).with_scan_engine(scanner);
+
+    // Prepare a scan folder with a new file
+    let scan_dir = tempdir().unwrap();
+    let sample_file = scan_dir.path().join("asset.dat");
+    fs::write(&sample_file, b"SAMPLE_PAYLOAD").unwrap();
+
+    // Fault Injection: Inject an SQLite trigger that aborts INSERT into asset_lifecycle
+    // This simulates database constraints, lock contention, disk corruption, or lifecycle schema failures
+    let db_path = vault_dir.path().join(".looma").join("vault.db");
+    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
+    raw_conn
+        .execute(
+            "CREATE TRIGGER fail_lifecycle_insert BEFORE INSERT ON asset_lifecycle
+             BEGIN
+                 SELECT RAISE(ABORT, 'Simulated lifecycle disk corruption');
+             END;",
+            [],
+        )
+        .unwrap();
+    drop(raw_conn);
+
+    // Execute scan: under the previous bug, `let _ = self.repo.set_asset_lifecycle(&new_lc)` would
+    // swallow this error and report success. Now, it MUST propagate the database error!
+    let scan_res = core.scan_directory(scan_dir.path(), None, None::<fn(ScanProgress)>);
+    assert!(
+        scan_res.is_err(),
+        "scan_directory must fail when asset_lifecycle persistence fails!"
+    );
+
+    let err_str = format!("{:?}", scan_res.err().unwrap());
+    assert!(
+        err_str.contains("Simulated lifecycle disk corruption"),
+        "Underlying database error must be propagated to caller: {err_str}"
+    );
+}

@@ -555,17 +555,25 @@ impl AssetService for LoomaDb {
 
     fn list_assets_by_prefix(&self, prefix: &str) -> LoomaResult<Vec<Asset>> {
         let conn = self.conn.lock();
-        let pattern = format!("{}%", prefix);
+        let norm_prefix = looma_core::normalize_directory_path(prefix);
+        let escaped = norm_prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let slash_pattern = format!("{}/%", escaped.trim_end_matches('/'));
+        let exact_pattern = escaped.trim_end_matches('/').to_string();
+
         let mut stmt = conn
             .prepare(
                 "SELECT id, kind, source, path, size, hash, mime_type, metadata_json, status,
                         created_at, modified_at, indexed_at
-                 FROM assets WHERE path LIKE ?1",
+                 FROM assets
+                 WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
             )
             .map_err(|e| LoomaError::Database(e.to_string()))?;
 
         let asset_iter = stmt
-            .query_map(params![pattern], |row| {
+            .query_map(params![exact_pattern, slash_pattern], |row| {
                 let kind_str: String = row.get(1)?;
                 let source_str: String = row.get(2)?;
                 let meta_str: String = row.get(7)?;
@@ -595,6 +603,14 @@ impl AssetService for LoomaDb {
         for item in asset_iter {
             let (id, kind_str, source_str, path, size, hash, mime, meta_str, status_str, c_str, m_str, i_str) =
                 item.map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            if let Some(ref p) = path {
+                if !looma_core::is_path_under_root(p, &norm_prefix) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
 
             let kind = serde_json::from_str(&format!("\"{}\"", kind_str)).unwrap_or_default();
             let source = serde_json::from_str(&format!("\"{}\"", source_str)).unwrap_or_default();
@@ -1822,31 +1838,32 @@ impl BackupService for LoomaDb {
         let entities_count = self.count_entities()? as usize;
         let memories = self.list_memories(100000, 0)?;
         let collections = self.list_collections()?;
-        let ext_refs = self.list_external_references(None).unwrap_or_default();
-        let experiences_count = self.count_experiences().unwrap_or(0) as usize;
-        let roots = self.list_source_roots().unwrap_or_default();
-        let suppressions = self.list_suppressions(None).unwrap_or_default();
+        let ext_refs = self.list_external_references(None)?;
+        let experiences_count = self.count_experiences()? as usize;
+        let roots = self.list_source_roots()?;
+        let suppressions = self.list_suppressions(None)?;
 
         let conn = self.conn.lock();
         // Checkpoint WAL to flush all transaction pages to disk before checksum computation
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(|e| LoomaError::Database(format!("Failed to checkpoint WAL: {e}")))?;
 
         let relations_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM relations", [], |r| r.get(0))
-            .unwrap_or(0);
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
 
         let schema_version: i64 = conn
             .query_row("SELECT COALESCE(MAX(version), 4) FROM _schema_migrations", [], |r| r.get(0))
-            .unwrap_or(4);
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
 
         let mut checksums = std::collections::HashMap::new();
         if self.db_path.exists() {
-            if let Ok(bytes) = std::fs::read(&self.db_path) {
-                use sha2::{Sha256, Digest};
-                let mut hasher = Sha256::new();
-                hasher.update(&bytes);
-                checksums.insert("vault.db".to_string(), format!("{:x}", hasher.finalize()));
-            }
+            let bytes = std::fs::read(&self.db_path)
+                .map_err(|e| LoomaError::Vault(format!("Failed to read database file for checksum: {e}")))?;
+            use sha2::{Sha256, Digest};
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            checksums.insert("vault.db".to_string(), format!("{:x}", hasher.finalize()));
         }
 
         Ok(VaultManifest {
@@ -1884,13 +1901,12 @@ impl BackupService for LoomaDb {
         let entities = self.list_entities(&EntityFilter::default())?;
         let memories = self.list_memories(100000, 0)?;
         let collections = self.list_collections()?;
-        let external_references = self.list_external_references(None).unwrap_or_default();
-        let experiences = self.list_experiences(&ExperienceFilter::default()).unwrap_or_default();
+        let external_references = self.list_external_references(None)?;
+        let experiences = self.list_experiences(&ExperienceFilter::default())?;
         let mut experience_links = Vec::new();
         for exp in &experiences {
-            if let Ok(links) = self.list_experience_links(&exp.id) {
-                experience_links.extend(links);
-            }
+            let links = self.list_experience_links(&exp.id)?;
+            experience_links.extend(links);
         }
 
         let mut relations = Vec::new();
@@ -1934,36 +1950,32 @@ impl BackupService for LoomaDb {
         }
 
         // 2. Write vault_dump.json
-        let source_roots = self.list_source_roots().unwrap_or_default();
-        let asset_suppressions = self.list_suppressions(None).unwrap_or_default();
+        let source_roots = self.list_source_roots()?;
+        let asset_suppressions = self.list_suppressions(None)?;
         let mut asset_lifecycles = Vec::new();
         {
             let conn = self.conn.lock();
-            let stmt_res = conn.prepare(
+            let mut stmt = conn.prepare(
                 "SELECT asset_id, root_id, relative_path, availability, visibility, tracking, last_verified_at, untracked_at, untracked_reason
                  FROM asset_lifecycle"
-            );
-            if let Ok(mut stmt) = stmt_res {
-                let rows = stmt.query_map([], |row| {
-                    let last_verified_str: Option<String> = row.get(6)?;
-                    let untracked_str: Option<String> = row.get(7)?;
-                    Ok(AssetLifecycle {
-                        asset_id: row.get(0)?,
-                        root_id: row.get(1)?,
-                        relative_path: row.get(2)?,
-                        availability: row.get(3)?,
-                        visibility: row.get(4)?,
-                        tracking: row.get(5)?,
-                        last_verified_at: last_verified_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
-                        untracked_at: untracked_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
-                        untracked_reason: row.get(8)?,
-                    })
-                });
-                if let Ok(mapped) = rows {
-                    for r in mapped.flatten() {
-                        asset_lifecycles.push(r);
-                    }
-                }
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+            let rows = stmt.query_map([], |row| {
+                let last_verified_str: Option<String> = row.get(6)?;
+                let untracked_str: Option<String> = row.get(7)?;
+                Ok(AssetLifecycle {
+                    asset_id: row.get(0)?,
+                    root_id: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    availability: row.get(3)?,
+                    visibility: row.get(4)?,
+                    tracking: row.get(5)?,
+                    last_verified_at: last_verified_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    untracked_at: untracked_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))),
+                    untracked_reason: row.get(8)?,
+                })
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+            for r in rows {
+                asset_lifecycles.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
             }
         }
 
@@ -2048,6 +2060,27 @@ impl BackupService for LoomaDb {
             backup_dir_or_file.parent().unwrap_or(backup_dir_or_file).to_path_buf()
         };
 
+        // 1. Strict Manifest & Checksum Pre-validation
+        let manifest_path = target_dir.join("manifest.json");
+        if !manifest_path.exists() {
+            return Err(LoomaError::Validation(format!(
+                "Backup archive invalid: manifest.json is required for vault restoration but was not found in {:?}",
+                target_dir
+            )));
+        }
+
+        let manifest_str = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| LoomaError::Vault(format!("Failed to read manifest.json: {e}")))?;
+        let manifest: VaultManifest = serde_json::from_str(&manifest_str)
+            .map_err(LoomaError::Serialization)?;
+
+        if manifest.schema_version > 4 {
+            return Err(LoomaError::Validation(format!(
+                "Unsupported backup schema version: {} (maximum supported schema version is 4)",
+                manifest.schema_version
+            )));
+        }
+
         let dump_path = target_dir.join("vault_dump.json");
         if !dump_path.exists() {
             return Err(LoomaError::Vault(format!(
@@ -2059,31 +2092,32 @@ impl BackupService for LoomaDb {
         let dump_bytes = std::fs::read(&dump_path)
             .map_err(|e| LoomaError::Vault(format!("Failed to read vault_dump.json: {e}")))?;
 
-        // Verify SHA-256 against manifest.json if present
-        let manifest_path = target_dir.join("manifest.json");
-        if manifest_path.exists() {
-            let manifest_str = std::fs::read_to_string(&manifest_path)
-                .map_err(|e| LoomaError::Vault(format!("Failed to read manifest.json: {e}")))?;
-            let manifest: VaultManifest = serde_json::from_str(&manifest_str)
-                .map_err(LoomaError::Serialization)?;
+        let expected_checksum = manifest.checksums.get("vault_dump.json").ok_or_else(|| {
+            LoomaError::Validation(
+                "Backup archive invalid: manifest.json is missing required checksum for vault_dump.json".to_string(),
+            )
+        })?;
 
-            if let Some(expected_checksum) = manifest.checksums.get("vault_dump.json") {
-                use sha2::{Sha256, Digest};
-                let mut hasher = Sha256::new();
-                hasher.update(&dump_bytes);
-                let actual_checksum = format!("{:x}", hasher.finalize());
+        {
+            use sha2::{Sha256, Digest};
+            let mut hasher = Sha256::new();
+            hasher.update(&dump_bytes);
+            let actual_checksum = format!("{:x}", hasher.finalize());
 
-                if !actual_checksum.eq_ignore_ascii_case(expected_checksum) {
-                    return Err(LoomaError::Validation(format!(
-                        "Backup archive corrupted: vault_dump.json checksum mismatch (expected {}, found {})",
-                        expected_checksum, actual_checksum
-                    )));
-                }
+            if !actual_checksum.eq_ignore_ascii_case(expected_checksum) {
+                return Err(LoomaError::Validation(format!(
+                    "Backup archive corrupted: vault_dump.json checksum mismatch (expected {}, found {})",
+                    expected_checksum, actual_checksum
+                )));
             }
         }
 
         let dump: VaultExportDump = serde_json::from_slice(&dump_bytes)
             .map_err(LoomaError::Serialization)?;
+
+        // 2. Execute Restoration Within a Single Unified Database Transaction
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
 
         let mut restored_assets = 0;
         let mut restored_entities = 0;
@@ -2092,81 +2126,293 @@ impl BackupService for LoomaDb {
         let mut restored_relations = 0;
         let mut restored_external_references = 0;
         let mut restored_experiences = 0;
+        let mut restored_source_roots = 0;
+        let mut restored_asset_suppressions = 0;
 
         for asset in dump.assets {
-            self.upsert_asset(&asset)?;
+            let kind_str = serde_json::to_string(&asset.kind).unwrap_or_default().trim_matches('"').to_string();
+            let source_str = serde_json::to_string(&asset.source).unwrap_or_default().trim_matches('"').to_string();
+            let status_str = serde_json::to_string(&asset.status).unwrap_or_default().trim_matches('"').to_string();
+            let meta_str = serde_json::to_string(&asset.metadata).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO assets (id, kind, source, path, size, hash, mime_type, metadata_json, status,
+                                    created_at, modified_at, indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    source = excluded.source,
+                    path = excluded.path,
+                    size = excluded.size,
+                    hash = excluded.hash,
+                    mime_type = excluded.mime_type,
+                    metadata_json = excluded.metadata_json,
+                    status = excluded.status,
+                    modified_at = excluded.modified_at,
+                    indexed_at = excluded.indexed_at",
+                params![
+                    asset.id,
+                    kind_str,
+                    source_str,
+                    asset.path,
+                    asset.size.map(|s| s as i64),
+                    asset.hash,
+                    asset.mime_type,
+                    meta_str,
+                    status_str,
+                    asset.created_at.to_rfc3339(),
+                    asset.modified_at.to_rfc3339(),
+                    asset.indexed_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_assets += 1;
         }
 
         for entity in dump.entities {
-            if self.get_entity_by_id(&entity.id)?.is_some() {
-                self.update_entity(&entity)?;
-            } else {
-                self.create_entity(&entity)?;
-            }
+            let props_str = serde_json::to_string(&entity.properties).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO entities (id, entity_type, title, description, properties_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET
+                    entity_type = excluded.entity_type,
+                    title = excluded.title,
+                    description = excluded.description,
+                    properties_json = excluded.properties_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    entity.id,
+                    entity.entity_type,
+                    entity.title,
+                    entity.description,
+                    props_str,
+                    entity.created_at.to_rfc3339(),
+                    entity.updated_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_entities += 1;
         }
 
         for memory in dump.memories {
-            if self.get_memory_by_id(&memory.id)?.is_some() {
-                self.update_memory(&memory)?;
-            } else {
-                self.create_memory(&memory)?;
-            }
+            let meta_str = serde_json::to_string(&memory.metadata).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO memories (id, title, content, category, metadata_json, recorded_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    content = excluded.content,
+                    category = excluded.category,
+                    metadata_json = excluded.metadata_json,
+                    recorded_at = excluded.recorded_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    memory.id,
+                    memory.title,
+                    memory.content,
+                    memory.category,
+                    meta_str,
+                    memory.recorded_at.to_rfc3339(),
+                    memory.created_at.to_rfc3339(),
+                    memory.updated_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_memories += 1;
         }
 
         for collection in dump.collections {
-            if self.get_collection_by_id(&collection.id)?.is_none() {
-                self.create_collection(&collection)?;
-            }
+            let meta_str = serde_json::to_string(&collection.metadata).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO collections (id, title, description, query, metadata_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    description = excluded.description,
+                    query = excluded.query,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    collection.id,
+                    collection.title,
+                    collection.description,
+                    collection.query,
+                    meta_str,
+                    collection.created_at.to_rfc3339(),
+                    collection.updated_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_collections += 1;
         }
 
         for relation in dump.relations {
-            self.create_relation(&relation)?;
+            let meta_str = serde_json::to_string(&relation.metadata).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO relations (id, source_id, source_type, relation_type, target_id, target_type, metadata_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO UPDATE SET
+                    source_id = excluded.source_id,
+                    source_type = excluded.source_type,
+                    relation_type = excluded.relation_type,
+                    target_id = excluded.target_id,
+                    target_type = excluded.target_type,
+                    metadata_json = excluded.metadata_json",
+                params![
+                    relation.id,
+                    relation.source_id,
+                    relation.source_type,
+                    relation.relation_type,
+                    relation.target_id,
+                    relation.target_type,
+                    meta_str,
+                    relation.created_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_relations += 1;
         }
 
         for ext_ref in dump.external_references {
-            if self.get_external_reference_by_id(&ext_ref.id)?.is_some() {
-                self.update_external_reference(&ext_ref)?;
-            } else {
-                self.create_external_reference(&ext_ref)?;
-            }
+            let meta_str = serde_json::to_string(&ext_ref.metadata).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO external_references (id, entity_id, provider, title, url, description, metadata_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(id) DO UPDATE SET
+                    entity_id = excluded.entity_id,
+                    provider = excluded.provider,
+                    title = excluded.title,
+                    url = excluded.url,
+                    description = excluded.description,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    ext_ref.id,
+                    ext_ref.entity_id,
+                    ext_ref.provider,
+                    ext_ref.title,
+                    ext_ref.url,
+                    ext_ref.description,
+                    meta_str,
+                    ext_ref.created_at.to_rfc3339(),
+                    ext_ref.updated_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_external_references += 1;
         }
 
         for exp in dump.experiences {
-            if self.get_experience_by_id(&exp.id)?.is_some() {
-                self.update_experience(&exp)?;
-            } else {
-                self.create_experience(&exp, &[], None)?;
-            }
+            let ctx_str = serde_json::to_string(&exp.context_json).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO experience_entries (id, subject_type, subject_id, event_type, title, note, occurred_value, occurred_precision, context_json, visibility, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(id) DO UPDATE SET
+                    subject_type = excluded.subject_type,
+                    subject_id = excluded.subject_id,
+                    event_type = excluded.event_type,
+                    title = excluded.title,
+                    note = excluded.note,
+                    occurred_value = excluded.occurred_value,
+                    occurred_precision = excluded.occurred_precision,
+                    context_json = excluded.context_json,
+                    visibility = excluded.visibility,
+                    updated_at = excluded.updated_at",
+                params![
+                    exp.id,
+                    exp.subject_type,
+                    exp.subject_id,
+                    exp.event_type,
+                    exp.title,
+                    exp.note,
+                    exp.occurred_value,
+                    exp.occurred_precision,
+                    ctx_str,
+                    exp.visibility,
+                    exp.created_at.to_rfc3339(),
+                    exp.updated_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_experiences += 1;
         }
 
         for link in dump.experience_links {
-            self.add_experience_link(&link)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO experience_links (experience_id, linked_type, linked_id, relation_type, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    link.experience_id,
+                    link.linked_type,
+                    link.linked_id,
+                    link.relation_type,
+                    link.position,
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
         }
 
-        let mut restored_source_roots = 0;
         for root in dump.source_roots {
-            if self.get_source_root(&root.id)?.is_none() {
-                self.create_source_root(&root)?;
-                restored_source_roots += 1;
-            }
+            let settings_str = serde_json::to_string(&root.settings_json).unwrap_or_else(|_| "{}".to_string());
+            tx.execute(
+                "INSERT INTO source_roots (id, label, path, source_kind, enabled, state, last_successful_scan_at, last_seen_at, settings_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(id) DO UPDATE SET
+                    label = excluded.label,
+                    path = excluded.path,
+                    source_kind = excluded.source_kind,
+                    enabled = excluded.enabled,
+                    state = excluded.state,
+                    last_successful_scan_at = excluded.last_successful_scan_at,
+                    last_seen_at = excluded.last_seen_at,
+                    settings_json = excluded.settings_json",
+                params![
+                    root.id,
+                    root.label,
+                    root.path,
+                    root.source_kind,
+                    if root.enabled { 1 } else { 0 },
+                    root.state,
+                    root.last_successful_scan_at.map(|d| d.to_rfc3339()),
+                    root.last_seen_at.map(|d| d.to_rfc3339()),
+                    settings_str,
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+            restored_source_roots += 1;
         }
 
         for lc in dump.asset_lifecycles {
-            self.set_asset_lifecycle(&lc)?;
+            tx.execute(
+                "INSERT INTO asset_lifecycle (asset_id, root_id, relative_path, availability, visibility, tracking, last_verified_at, untracked_at, untracked_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(asset_id) DO UPDATE SET
+                   root_id = excluded.root_id,
+                   relative_path = excluded.relative_path,
+                   availability = excluded.availability,
+                   visibility = excluded.visibility,
+                   tracking = excluded.tracking,
+                   last_verified_at = excluded.last_verified_at,
+                   untracked_at = excluded.untracked_at,
+                   untracked_reason = excluded.untracked_reason",
+                params![
+                    lc.asset_id,
+                    lc.root_id,
+                    lc.relative_path,
+                    lc.availability,
+                    lc.visibility,
+                    lc.tracking,
+                    lc.last_verified_at.map(|d| d.to_rfc3339()),
+                    lc.untracked_at.map(|d| d.to_rfc3339()),
+                    lc.untracked_reason,
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
         }
 
-        let mut restored_asset_suppressions = 0;
         for sup in dump.asset_suppressions {
-            self.add_suppression(&sup.root_id, &sup.relative_path, sup.reason.as_deref())?;
+            let clean_rel = sup.relative_path.trim_start_matches('/').trim_start_matches('\\');
+            let now = Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO asset_scan_suppressions (id, root_id, relative_path, reason, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(root_id, relative_path) DO UPDATE SET reason = excluded.reason",
+                params![sup.id, sup.root_id, clean_rel, sup.reason, now],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_asset_suppressions += 1;
         }
+
+        // Commit the transaction atomically
+        tx.commit().map_err(|e| LoomaError::Database(format!("Failed to commit restore transaction: {e}")))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
