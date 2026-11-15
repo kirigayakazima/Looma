@@ -841,13 +841,22 @@ fn resolve_default_vault_path() -> PathBuf {
 }
 
 pub fn run() {
-    tracing_subscriber::fmt::init();
     let vault_path = resolve_default_vault_path();
+    let vp_clone = vault_path.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("Looma panicked: {info}\nBacktrace:\n{:?}", std::backtrace::Backtrace::capture());
+        let _ = std::fs::write("looma_crash.log", &msg);
+        let _ = std::fs::write(vp_clone.join("looma_crash.log"), &msg);
+        eprintln!("{msg}");
+    }));
+
+    tracing_subscriber::fmt::init();
     let db = match LoomaDb::open(&vault_path) {
         Ok(db) => db,
         Err(e) => {
             let msg = format!("Failed to open LoomaDb at {:?}: {e}", vault_path);
             let _ = std::fs::write("looma_error.log", &msg);
+            let _ = std::fs::write(vault_path.join("looma_error.log"), &msg);
             panic!("{}", msg);
         }
     };
@@ -940,6 +949,7 @@ pub fn run() {
     {
         let msg = format!("Failed to run Tauri: {e}");
         let _ = std::fs::write("looma_error.log", &msg);
+        let _ = std::fs::write(vault_path.join("looma_error.log"), &msg);
         panic!("{}", msg);
     }
 }
