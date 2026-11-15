@@ -677,6 +677,32 @@ fn batch_auto_match_game_covers(
 }
 
 #[tauri::command]
+fn check_ai_service_status(
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<AiServiceStatus, String> {
+    Ok(state.core.check_ai_service_status(endpoint.as_deref(), api_key.as_deref()))
+}
+
+#[tauri::command]
+fn analyze_game_with_ai(
+    raw_title: String,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<AiGameAnalysis, String> {
+    state.core.analyze_game_with_ai(
+        &raw_title,
+        endpoint.as_deref(),
+        api_key.as_deref(),
+        model.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn detect_game_candidates(
     root_path: String,
     state: State<'_, AppState>,
@@ -906,7 +932,9 @@ pub fn run() {
             remove_work_cover,
             download_and_set_work_cover,
             fetch_cover_candidates,
-            batch_auto_match_game_covers
+            batch_auto_match_game_covers,
+            check_ai_service_status,
+            analyze_game_with_ai
         ])
         .run(tauri::generate_context!())
     {

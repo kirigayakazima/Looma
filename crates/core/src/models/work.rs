@@ -627,6 +627,25 @@ pub struct AutoMatchResult {
     pub matched_titles: Vec<String>,
 }
 
+/// Status of the local or remote OpenAI-compatible AI service (e.g. Gemini reverse proxy on :8081)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiServiceStatus {
+    pub online: bool,
+    pub endpoint: String,
+    pub model: String,
+    pub latency_ms: Option<u64>,
+    pub message: Option<String>,
+}
+
+/// Structural deduction for raw or messy game directory/title by AI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiGameAnalysis {
+    pub canonical_title: String,
+    pub english_title: Option<String>,
+    pub steam_appid: Option<String>,
+    pub switch_title_id: Option<String>,
+}
+
 /// Machine-readable invariant violation code
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

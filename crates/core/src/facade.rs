@@ -927,6 +927,133 @@ impl LoomaCore {
         self.set_work_cover_from_bytes(actor, work_id, &bytes, user_selected, Some("local_file"))
     }
 
+    /// Fast non-blocking health check for local or remote OpenAI-compatible AI reverse proxy.
+    pub fn check_ai_service_status(
+        &self,
+        endpoint: Option<&str>,
+        api_key: Option<&str>,
+    ) -> AiServiceStatus {
+        let ep = endpoint.unwrap_or("http://localhost:8081/v1").trim_end_matches('/');
+        let key = api_key.unwrap_or("sk-gemini");
+        let model = "gemini-flash-lite";
+
+        let start = std::time::Instant::now();
+        let models_url = format!("{ep}/models");
+
+        match ureq::get(&models_url)
+            .timeout(std::time::Duration::from_millis(1500))
+            .set("Authorization", &format!("Bearer {key}"))
+            .call()
+        {
+            Ok(resp) => {
+                if resp.status() == 200 {
+                    let latency = start.elapsed().as_millis() as u64;
+                    AiServiceStatus {
+                        online: true,
+                        endpoint: ep.to_string(),
+                        model: model.to_string(),
+                        latency_ms: Some(latency),
+                        message: Some("Local AI reverse proxy connected".to_string()),
+                    }
+                } else {
+                    AiServiceStatus {
+                        online: false,
+                        endpoint: ep.to_string(),
+                        model: model.to_string(),
+                        latency_ms: None,
+                        message: Some(format!("HTTP error {}", resp.status())),
+                    }
+                }
+            }
+            Err(e) => AiServiceStatus {
+                online: false,
+                endpoint: ep.to_string(),
+                model: model.to_string(),
+                latency_ms: None,
+                message: Some(format!("Unreachable: {e}")),
+            },
+        }
+    }
+
+    /// Analyzes an unnormalized or messy game folder name/title using local or remote LLM.
+    pub fn analyze_game_with_ai(
+        &self,
+        raw_title: &str,
+        endpoint: Option<&str>,
+        api_key: Option<&str>,
+        model: Option<&str>,
+    ) -> LoomaResult<AiGameAnalysis> {
+        let ep = endpoint.unwrap_or("http://localhost:8081/v1").trim_end_matches('/');
+        let key = api_key.unwrap_or("sk-gemini");
+        let chosen_model = model.unwrap_or("gemini-flash-lite");
+
+        let prompt = format!(
+            "You are a video game catalog expert. Analyze the following messy game title or directory name from a user's library:\n\
+            \"{raw_title}\"\n\n\
+            Identify the exact commercial game. Deduce its official primary title (in Chinese if popular, else English), English title, Steam AppID (if available on Steam), and Nintendo Switch Title ID (16-char hex like 01007EF00011E000, if on Switch).\n\
+            Respond ONLY with a valid JSON object matching this schema:\n\
+            {{\n\
+              \"canonical_title\": \"official title\",\n\
+              \"english_title\": \"English title or null\",\n\
+              \"steam_appid\": \"Steam AppID numeric string or null\",\n\
+              \"switch_title_id\": \"16-char hex Title ID or null\"\n\
+            }}\n\
+            Do not include any code block markdown like ```json, only the raw JSON."
+        );
+
+        let body = json!({
+            "model": chosen_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            "temperature": 0.2
+        });
+
+        let chat_url = format!("{ep}/chat/completions");
+        let resp = ureq::post(&chat_url)
+            .timeout(std::time::Duration::from_secs(18))
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string())
+            .map_err(|e| LoomaError::Validation(format!("AI service request failed: {e}")))?;
+
+        if resp.status() != 200 {
+            return Err(LoomaError::Validation(format!("AI service returned HTTP {}", resp.status())));
+        }
+
+        let val: serde_json::Value = serde_json::from_reader(resp.into_reader())
+            .map_err(|e| LoomaError::Validation(format!("Failed to parse AI JSON response: {e}")))?;
+
+        let content = val.get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|cnt| cnt.as_str())
+            .ok_or_else(|| LoomaError::Validation("Empty or invalid choices from AI".to_string()))?;
+
+        let cleaned = content.trim();
+        let cleaned = if cleaned.starts_with("```") {
+            let without_start = cleaned.trim_start_matches('`');
+            let without_lang = if without_start.starts_with("json") {
+                &without_start[4..]
+            } else {
+                without_start
+            };
+            without_lang.trim_end_matches('`').trim()
+        } else {
+            cleaned
+        };
+
+        let analysis: AiGameAnalysis = serde_json::from_str(cleaned)
+            .map_err(|e| LoomaError::Validation(format!("Failed to deserialize AI game analysis: {e}. Raw content: {cleaned}")))?;
+
+        Ok(analysis)
+    }
+
     pub fn download_and_set_work_cover(
         &self,
         actor: &str,
@@ -1094,6 +1221,71 @@ impl LoomaCore {
             }
         }
 
+        // 4. AI-assisted fallback if no candidates found and AI service is online
+        if candidates.is_empty() {
+            let ai_status = self.check_ai_service_status(None, None);
+            if ai_status.online {
+                if let Ok(analysis) = self.analyze_game_with_ai(&work.title, None, None, None) {
+                    if let Some(appid) = &analysis.steam_appid {
+                        let id_clean = appid.trim();
+                        if id_clean.chars().all(|c| c.is_ascii_digit()) && !id_clean.is_empty() {
+                            let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{id_clean}/library_600x900.jpg");
+                            candidates.push(CoverCandidate {
+                                provider: "steam".to_string(),
+                                title: format!("{} (AI 识别: {})", analysis.canonical_title, work.title),
+                                image_url: capsule_url,
+                                aspect_ratio: "2:3".to_string(),
+                                description: Some(format!("AI 识别 Steam AppID: {id_clean}")),
+                            });
+                        }
+                    }
+
+                    if let Some(tid) = &analysis.switch_title_id {
+                        let upper = tid.trim().to_uppercase();
+                        if upper.len() == 16 && upper.chars().all(|c| c.is_ascii_hexdigit()) {
+                            candidates.push(CoverCandidate {
+                                provider: "nlib".to_string(),
+                                title: format!("{} (AI 识别 Switch 图标)", analysis.canonical_title),
+                                image_url: format!("https://api.nlib.cc/nx/{upper}/icon"),
+                                aspect_ratio: "1:1".to_string(),
+                                description: Some(format!("AI 识别 Switch Title ID: {upper}")),
+                            });
+                        }
+                    }
+
+                    if !analysis.canonical_title.trim().is_empty() {
+                        let encoded = Self::percent_encode(&analysis.canonical_title);
+                        let search_url = format!("https://store.steampowered.com/api/storesearch/?term={encoded}&cc=US");
+                        if let Ok(resp) = ureq::get(&search_url).timeout(std::time::Duration::from_secs(6)).call() {
+                            if resp.status() == 200 {
+                                if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
+                                    if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
+                                        for item in items.iter().take(4) {
+                                            if let (Some(id), Some(name)) = (
+                                                item.get("id").and_then(|v| v.as_u64()),
+                                                item.get("name").and_then(|v| v.as_str()),
+                                            ) {
+                                                let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg");
+                                                if !candidates.iter().any(|c| c.image_url == capsule_url) {
+                                                    candidates.push(CoverCandidate {
+                                                        provider: "steam".to_string(),
+                                                        title: format!("{} (AI 检索)", name),
+                                                        image_url: capsule_url,
+                                                        aspect_ratio: "2:3".to_string(),
+                                                        description: Some(format!("AI 匹配 Steam | AppID: {id}")),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(candidates)
     }
 
@@ -1183,6 +1375,69 @@ impl LoomaCore {
                 if found {
                     continue;
                 }
+            }
+
+            // 4. Try AI-Assisted Matching for messy/obscure names if AI service is online
+            let mut ai_matched = false;
+            let ai_status = self.check_ai_service_status(None, None);
+            if ai_status.online {
+                if let Ok(analysis) = self.analyze_game_with_ai(&work.title, None, None, None) {
+                    // 4.1 Try Steam AppID from AI
+                    if let Some(appid) = &analysis.steam_appid {
+                        let id_clean = appid.trim();
+                        if id_clean.chars().all(|c| c.is_ascii_digit()) && !id_clean.is_empty() {
+                            let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{id_clean}/library_600x900.jpg");
+                            if self.download_and_set_work_cover(actor, &work.id, &capsule_url, false).is_ok() {
+                                matched_count += 1;
+                                matched_titles.push(format!("{} (AI -> {})", work.title, analysis.canonical_title));
+                                ai_matched = true;
+                            }
+                        }
+                    }
+
+                    // 4.2 Try Switch Title ID from AI
+                    if !ai_matched {
+                        if let Some(tid) = &analysis.switch_title_id {
+                            let upper = tid.trim().to_uppercase();
+                            if upper.len() == 16 && upper.chars().all(|c| c.is_ascii_hexdigit()) {
+                                let icon_url = format!("https://api.nlib.cc/nx/{upper}/icon");
+                                if self.download_and_set_work_cover(actor, &work.id, &icon_url, false).is_ok() {
+                                    matched_count += 1;
+                                    matched_titles.push(format!("{} (AI Switch -> {})", work.title, analysis.canonical_title));
+                                    ai_matched = true;
+                                }
+                            }
+                        }
+                    }
+
+                    // 4.3 Try searching Steam for canonical title from AI
+                    if !ai_matched && !analysis.canonical_title.trim().is_empty() {
+                        let encoded = Self::percent_encode(&analysis.canonical_title);
+                        let search_url = format!("https://store.steampowered.com/api/storesearch/?term={encoded}&cc=US");
+                        if let Ok(resp) = ureq::get(&search_url).timeout(std::time::Duration::from_secs(5)).call() {
+                            if resp.status() == 200 {
+                                if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
+                                    if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
+                                        if let Some(first) = items.first() {
+                                            if let Some(app_id) = first.get("id").and_then(|v| v.as_u64()) {
+                                                let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{app_id}/library_600x900.jpg");
+                                                if self.download_and_set_work_cover(actor, &work.id, &capsule_url, false).is_ok() {
+                                                    matched_count += 1;
+                                                    matched_titles.push(format!("{} (AI -> {})", work.title, analysis.canonical_title));
+                                                    ai_matched = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if ai_matched {
+                continue;
             }
 
             failed_count += 1;

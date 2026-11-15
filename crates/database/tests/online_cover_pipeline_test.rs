@@ -111,3 +111,26 @@ fn test_online_cover_fetch_and_managed_persistence() {
     let c = nlib_candidate.unwrap();
     assert!(c.image_url.contains("01007EF00011E000/icon"));
 }
+
+#[test]
+fn test_ai_service_status_and_game_analysis() {
+    let db = LoomaDb::in_memory().expect("in-memory db failed");
+    let core = LoomaCore::new(Arc::new(db));
+
+    // Test health check against local endpoint
+    let status = core.check_ai_service_status(None, None);
+    if status.online {
+        assert!(status.latency_ms.is_some());
+        let analysis = core
+            .analyze_game_with_ai("Zang.Hua.Build.9441554", None, None, None)
+            .expect("analyze_game_with_ai failed");
+
+        assert!(
+            analysis.canonical_title.contains("葬花")
+                || analysis.canonical_title.to_lowercase().contains("beauty")
+                || analysis.canonical_title.to_lowercase().contains("zang"),
+            "Should deduce Zang Hua title: got {}",
+            analysis.canonical_title
+        );
+    }
+}

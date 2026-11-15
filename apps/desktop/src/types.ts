@@ -439,4 +439,19 @@ export interface AutoMatchResult {
   matched_titles: string[];
 }
 
+export interface AiServiceStatus {
+  online: boolean;
+  endpoint: string;
+  model: string;
+  latency_ms?: number | null;
+  message?: string | null;
+}
+
+export interface AiGameAnalysis {
+  canonical_title: string;
+  english_title?: string | null;
+  steam_appid?: string | null;
+  switch_title_id?: string | null;
+}
+
 

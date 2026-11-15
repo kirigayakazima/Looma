@@ -29,6 +29,7 @@ import {
 import { WorkDetailDrawer } from './WorkDetailDrawer';
 import { SwitchImportModal } from './SwitchImportModal';
 import { CoverImage } from './CoverImage';
+import { AiStatusBadge } from './AiStatusBadge';
 
 interface GamesViewProps {
   assets: Asset[];
@@ -396,6 +397,8 @@ export const GamesView: React.FC<GamesViewProps> = ({
             </div>
 
             <div className="flex items-center gap-2.5">
+              <AiStatusBadge />
+
               <button
                 onClick={() => setShowSwitchImportModal(true)}
                 className="px-3.5 py-2 rounded-lg bg-red-950/40 hover:bg-red-900/40 text-red-300 border border-red-500/30 text-xs font-medium flex items-center gap-2 transition-all cursor-pointer shadow-sm"
