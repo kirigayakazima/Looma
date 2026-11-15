@@ -26,6 +26,7 @@ import {
   GameCandidate,
 } from '../types';
 import { WorkDetailDrawer } from './WorkDetailDrawer';
+import { SwitchImportModal } from './SwitchImportModal';
 
 interface GamesViewProps {
   assets: Asset[];
@@ -52,6 +53,7 @@ export const GamesView: React.FC<GamesViewProps> = ({
   // Modals
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showCandidateModal, setShowCandidateModal] = useState(false);
+  const [showSwitchImportModal, setShowSwitchImportModal] = useState(false);
 
   // Create Form State
   const [newTitle, setNewTitle] = useState('');
@@ -368,6 +370,14 @@ export const GamesView: React.FC<GamesViewProps> = ({
             </div>
 
             <div className="flex items-center gap-2.5">
+              <button
+                onClick={() => setShowSwitchImportModal(true)}
+                className="px-3.5 py-2 rounded-lg bg-red-950/40 hover:bg-red-900/40 text-red-300 border border-red-500/30 text-xs font-medium flex items-center gap-2 transition-all cursor-pointer shadow-sm"
+              >
+                <RefreshCw className="w-4 h-4 text-red-400" />
+                <span>同步 Switch 游玩记录</span>
+              </button>
+
               <button
                 onClick={() => {
                   setShowCandidateModal(true);
@@ -933,6 +943,15 @@ export const GamesView: React.FC<GamesViewProps> = ({
           </div>
         </div>
       )}
+      {/* Switch Import Modal */}
+      <SwitchImportModal
+        isOpen={showSwitchImportModal}
+        onClose={() => setShowSwitchImportModal(false)}
+        onSuccess={async () => {
+          await loadGames();
+          if (onRefreshAll) await onRefreshAll();
+        }}
+      />
     </div>
   );
 };

@@ -336,3 +336,92 @@ export interface WorkSummary {
   experiences: ExperienceEntry[];
 }
 
+export interface GameActivityRecord {
+  id: string;
+  work_id: string;
+  provider: string;
+  source_key: string;
+  external_id: string;
+  source_label?: string | null;
+  title_hint?: string | null;
+  playtime_seconds: number;
+  peak_seen_seconds: number;
+  launch_count?: number | null;
+  first_played_at?: string | null;
+  last_played_at?: string | null;
+  source_exported_at?: number | null;
+  last_import_sha256?: string | null;
+  updated_at: string;
+}
+
+export interface SwitchProfilePreview {
+  user_id: string;
+  user_name: string;
+  title_count: number;
+}
+
+export type SwitchGameMatchStatus = 'ExactMapped' | 'SuggestedMatch' | 'NewGame';
+
+export interface SwitchGameCandidatePreview {
+  external_id: string;
+  title_name: string;
+  playtime_seconds: number;
+  playtime_hours: number;
+  launches?: number | null;
+  first_played_at?: string | null;
+  last_played_at?: string | null;
+  match_status: SwitchGameMatchStatus;
+  matched_work_id?: string | null;
+  matched_work_title?: string | null;
+  existing_playtime_seconds?: number | null;
+  existing_peak_seconds?: number | null;
+  is_time_decreased: boolean;
+  is_duplicate_snapshot: boolean;
+  warning?: string | null;
+}
+
+export interface SwitchImportPreview {
+  file_sha256: string;
+  export_timestamp?: number | null;
+  export_version?: string | null;
+  profiles: SwitchProfilePreview[];
+  selected_user_id: string;
+  selected_user_name: string;
+  games: SwitchGameCandidatePreview[];
+  total_games: number;
+  new_games_count: number;
+  matched_games_count: number;
+  warning_count: number;
+}
+
+export type SwitchImportAction =
+  | { type: 'LinkExistingWork'; work_id: string }
+  | { type: 'CreateNewWork'; title: string }
+  | { type: 'Skip' };
+
+export interface SwitchImportItemDecision {
+  external_id: string;
+  title_hint: string;
+  playtime_seconds: number;
+  launch_count?: number | null;
+  first_played_at?: string | null;
+  last_played_at?: string | null;
+  action: SwitchImportAction;
+}
+
+export interface SwitchImportDecision {
+  file_sha256: string;
+  selected_user_id: string;
+  user_label?: string | null;
+  source_exported_at?: number | null;
+  items: SwitchImportItemDecision[];
+}
+
+export interface SwitchImportOutcome {
+  imported_records: number;
+  created_works: number;
+  updated_records: number;
+  skipped_records: number;
+}
+
+

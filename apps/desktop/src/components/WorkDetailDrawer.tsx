@@ -13,12 +13,15 @@ import {
   Minus,
   Clock,
   Trash2,
+  Gamepad2,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   Asset,
   WorkSummary,
   RecordStatus,
   ExternalReference,
+  GameActivityRecord,
 } from '../types';
 import { ExperienceModal } from './ExperienceModal';
 
@@ -42,6 +45,11 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
   // Experience modal state
   const [showExpModal, setShowExpModal] = useState(false);
   const [expDefaultType, setExpDefaultType] = useState('completed');
+  const [expDefaultPlatform, setExpDefaultPlatform] = useState('');
+  const [expDefaultNote, setExpDefaultNote] = useState('');
+
+  // Game activity records
+  const [activities, setActivities] = useState<GameActivityRecord[]>([]);
 
   // Add Ref Modal State
   const [showAddRefModal, setShowAddRefModal] = useState(false);
@@ -71,15 +79,18 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
   const loadSummary = useCallback(async () => {
     if (!workId) {
       setSummary(null);
+      setActivities([]);
       return;
     }
     setLoading(true);
     setErrorMsg(null);
     try {
-      const data = await safeInvoke<WorkSummary>('get_work_summary', { id: workId });
-      if (data) {
-        setSummary(data);
-      }
+      const [data, acts] = await Promise.all([
+        safeInvoke<WorkSummary>('get_work_summary', { id: workId }),
+        safeInvoke<GameActivityRecord[]>('list_game_activities', { workId }),
+      ]);
+      if (data) setSummary(data);
+      if (acts) setActivities(acts);
     } finally {
       setLoading(false);
     }
@@ -404,6 +415,81 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
                   </div>
                 </div>
 
+                {/* Cross-Platform Playtime & Activity Records */}
+                {activities.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-semibold text-neutral-200 uppercase tracking-wider flex items-center gap-1.5">
+                        <Gamepad2 className="w-3.5 h-3.5 text-red-400" />
+                        <span>游玩时长与设备记录 ({activities.length})</span>
+                      </h4>
+                    </div>
+
+                    <div className="space-y-2.5">
+                      {activities.map((act) => {
+                        const hours = (act.playtime_seconds / 3600).toFixed(1);
+                        const peakHours = (act.peak_seen_seconds / 3600).toFixed(1);
+                        const isReset = act.peak_seen_seconds > act.playtime_seconds;
+                        const lastPlayed = act.last_played_at
+                          ? new Date(act.last_played_at).toLocaleDateString()
+                          : '未记录';
+
+                        return (
+                          <div
+                            key={act.id}
+                            className="p-3.5 rounded-xl bg-neutral-950 border border-neutral-850 space-y-2.5 text-xs"
+                          >
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-2">
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/10 text-red-400 border border-red-500/20">
+                                  {act.source_label || (act.provider === 'switch_nx' ? 'Switch' : act.provider)}
+                                </span>
+                                <span className="font-mono text-emerald-400 font-bold text-sm">
+                                  {hours} 小时
+                                </span>
+                                {act.launch_count != null && (
+                                  <span className="text-[11px] text-neutral-400">
+                                    • {act.launch_count} 次启动
+                                  </span>
+                                )}
+                              </div>
+
+                              <button
+                                onClick={() => {
+                                  setExpDefaultType('completed');
+                                  setExpDefaultPlatform(act.source_label || 'Switch');
+                                  setExpDefaultNote(`Switch 累计游玩约 ${hours} 小时`);
+                                  setShowExpModal(true);
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-medium text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                                title="以当前 Switch 游玩时长为参考，补录通关足迹"
+                              >
+                                <Compass className="w-3 h-3" />
+                                <span>补录通关足迹</span>
+                              </button>
+                            </div>
+
+                            <div className="flex items-center gap-3 text-[11px] text-neutral-400 flex-wrap">
+                              <span>最近游玩: {lastPlayed}</span>
+                              <span>•</span>
+                              <span className="font-mono text-[10px]">Title ID: {act.external_id}</span>
+                            </div>
+
+                            {isReset && (
+                              <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] flex items-center gap-1.5">
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                <span>
+                                  当前源报告 {hours}h；历史曾报告 {peakHours}h（可能经历过系统重置）
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 {/* Personal Footprints & Experiences (Core V0.5 Highlight) */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
@@ -609,10 +695,16 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
       {/* Experience Footprint Modal */}
       <ExperienceModal
         isOpen={showExpModal}
-        onClose={() => setShowExpModal(false)}
+        onClose={() => {
+          setShowExpModal(false);
+          setExpDefaultPlatform('');
+          setExpDefaultNote('');
+        }}
         workId={workId}
         workTitle={work?.title || ''}
         defaultEventType={expDefaultType}
+        defaultPlatform={expDefaultPlatform}
+        defaultNote={expDefaultNote}
         onSuccess={async () => {
           await loadSummary();
           if (onRefreshAll) await onRefreshAll();

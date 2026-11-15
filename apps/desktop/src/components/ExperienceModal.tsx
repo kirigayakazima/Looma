@@ -8,6 +8,8 @@ interface ExperienceModalProps {
   workId: string;
   workTitle: string;
   defaultEventType?: string;
+  defaultPlatform?: string;
+  defaultNote?: string;
   onSuccess?: () => Promise<void> | void;
 }
 
@@ -17,14 +19,16 @@ export const ExperienceModal: React.FC<ExperienceModalProps> = ({
   workId,
   workTitle,
   defaultEventType = 'completed',
+  defaultPlatform = '',
+  defaultNote = '',
   onSuccess,
 }) => {
   const [eventType, setEventType] = useState(defaultEventType);
   const [title, setTitle] = useState('');
   const [precision, setPrecision] = useState<'unknown' | 'year' | 'month' | 'day'>('unknown');
   const [dateValue, setDateValue] = useState('');
-  const [platform, setPlatform] = useState('');
-  const [note, setNote] = useState('');
+  const [platform, setPlatform] = useState(defaultPlatform);
+  const [note, setNote] = useState(defaultNote);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -41,14 +45,14 @@ export const ExperienceModal: React.FC<ExperienceModalProps> = ({
           ? '入坑开启'
           : ''
       );
-      // Default to unknown time and empty platform to prevent artificial distortion
+      // Default to unknown time to prevent artificial distortion
       setPrecision('unknown');
       setDateValue('');
-      setPlatform('');
-      setNote('');
+      setPlatform(defaultPlatform);
+      setNote(defaultNote);
       setErrorMsg(null);
     }
-  }, [isOpen, defaultEventType]);
+  }, [isOpen, defaultEventType, defaultPlatform, defaultNote]);
 
   if (!isOpen) return null;
 

@@ -574,6 +574,52 @@ fn archive_experience(
 }
 
 #[tauri::command]
+fn pick_json_file() -> Result<Option<String>, String> {
+    let file = rfd::FileDialog::new()
+        .add_filter("JSON Files", &["json"])
+        .pick_file();
+    Ok(file.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn read_file_content(path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("File does not exist: {path}"));
+    }
+    let metadata = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    if metadata.len() > 50 * 1024 * 1024 {
+        return Err("File is too large (maximum 50MB)".to_string());
+    }
+    std::fs::read_to_string(p).map_err(|e| format!("Failed to read file: {e}"))
+}
+
+#[tauri::command]
+fn preview_switch_import(
+    json_content: String,
+    user_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<SwitchImportPreview, String> {
+    state.core.preview_switch_import(&json_content, user_id.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn commit_switch_import(
+    decision: SwitchImportDecision,
+    state: State<'_, AppState>,
+) -> Result<SwitchImportOutcome, String> {
+    state.core.commit_switch_import("desktop", &decision).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_game_activities(
+    work_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<GameActivityRecord>, String> {
+    state.core.list_game_activities_for_work(&work_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn detect_game_candidates(
     root_path: String,
     state: State<'_, AppState>,
@@ -792,7 +838,12 @@ pub fn run() {
             archive_experience,
             get_asset_thumbnail,
             get_thumbnail_cache_stats,
-            clear_thumbnail_cache
+            clear_thumbnail_cache,
+            pick_json_file,
+            read_file_content,
+            preview_switch_import,
+            commit_switch_import,
+            list_game_activities
         ])
         .run(tauri::generate_context!())
     {
