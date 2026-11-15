@@ -22,6 +22,7 @@ pub trait VaultRepository:
     + ExternalReferenceService
     + ExperienceService
     + SourceRootService
+    + SearchService
     + Send
     + Sync
 {
@@ -40,6 +41,7 @@ impl<T> VaultRepository for T where
         + ExternalReferenceService
         + ExperienceService
         + SourceRootService
+        + SearchService
         + Send
         + Sync
 {
@@ -260,6 +262,14 @@ impl LoomaCore {
 
     pub fn count_assets(&self) -> LoomaResult<u64> {
         self.repo.count_assets()
+    }
+
+    pub fn count_assets_with_filter(&self, filter: &AssetFilter) -> LoomaResult<u64> {
+        self.repo.count_assets_with_filter(filter)
+    }
+
+    pub fn search_vault(&self, query: &str, category: Option<&str>, limit: usize) -> LoomaResult<VaultSearchResults> {
+        self.repo.search_vault(query, category, limit)
     }
 
     pub fn count_entities(&self) -> LoomaResult<u64> {
@@ -2631,5 +2641,15 @@ impl AssetService for LoomaCore {
 
     fn count_assets(&self) -> LoomaResult<u64> {
         self.repo.count_assets()
+    }
+
+    fn count_assets_with_filter(&self, filter: &AssetFilter) -> LoomaResult<u64> {
+        self.repo.count_assets_with_filter(filter)
+    }
+}
+
+impl SearchService for LoomaCore {
+    fn search_vault(&self, query: &str, category: Option<&str>, limit: usize) -> LoomaResult<VaultSearchResults> {
+        self.repo.search_vault(query, category, limit)
     }
 }

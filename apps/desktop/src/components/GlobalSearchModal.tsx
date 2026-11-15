@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Asset, Entity, Collection, Memory } from '../types';
+import { invoke } from '@tauri-apps/api/core';
+import { Asset, Entity, Collection, Memory, VaultSearchResults } from '../types';
 import {
   Search,
   X,
@@ -88,7 +89,78 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
     }
   };
 
-  const results = useMemo(() => {
+  const [remoteResults, setRemoteResults] = useState<SearchResultItem[] | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setRemoteResults(null);
+      return;
+    }
+    const q = query.trim();
+    if (!q) {
+      setRemoteResults(null);
+      return;
+    }
+
+    let isMounted = true;
+    setIsSearching(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await invoke<VaultSearchResults>('search_vault', {
+          query: q,
+          category: activeCategory === 'all' ? null : activeCategory,
+          limit: 100,
+        });
+
+        if (isMounted && res && Array.isArray(res.items)) {
+          const mapped: SearchResultItem[] = res.items.map((item) => {
+            let icon: React.ReactNode;
+            switch (item.category) {
+              case 'asset':
+                icon = getAssetIcon(item.badge || 'other');
+                break;
+              case 'entity':
+                icon = <Layers className="w-4 h-4 text-indigo-400" />;
+                break;
+              case 'collection':
+                icon = <FolderHeart className="w-4 h-4 text-purple-400" />;
+                break;
+              case 'memory':
+                icon = <BookOpen className="w-4 h-4 text-amber-400" />;
+                break;
+              default:
+                icon = <Sparkles className="w-4 h-4 text-neutral-400" />;
+            }
+
+            return {
+              id: item.id,
+              category: item.category as any,
+              title: item.title,
+              subtitle: item.subtitle,
+              badge: item.badge,
+              icon,
+            };
+          });
+
+          setRemoteResults(mapped);
+        }
+      } catch (err) {
+        console.warn('Backend search_vault failed, falling back to local memory:', err);
+        if (isMounted) setRemoteResults(null);
+      } finally {
+        if (isMounted) setIsSearching(false);
+      }
+    }, 100);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, [isOpen, query, activeCategory]);
+
+  const localResults = useMemo(() => {
     const q = query.trim().toLowerCase();
     const items: SearchResultItem[] = [];
 
@@ -187,6 +259,8 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
     return items;
   }, [query, activeCategory, assets, entities, collections, memories]);
 
+  const results = remoteResults !== null ? remoteResults : localResults;
+
   // Keep selected index within bounds
   useEffect(() => {
     setSelectedIndex(0);
@@ -250,6 +324,9 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
             onChange={(e) => setQuery(e.target.value)}
             className="w-full bg-transparent text-sm text-neutral-100 placeholder-neutral-500 focus:outline-none"
           />
+          {isSearching && (
+            <span className="text-[11px] text-indigo-400 font-mono animate-pulse mr-2">全库检索中...</span>
+          )}
           {query ? (
             <button
               onClick={() => setQuery('')}

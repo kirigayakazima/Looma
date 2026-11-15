@@ -207,6 +207,19 @@ export interface BatchApplyResult {
   errors: string[];
 }
 
+export interface VaultSearchResultItem {
+  id: string;
+  category: 'asset' | 'entity' | 'collection' | 'memory';
+  title: string;
+  subtitle: string;
+  badge?: string;
+}
+
+export interface VaultSearchResults {
+  items: VaultSearchResultItem[];
+  total_matches: number;
+}
+
 export interface ExternalReference {
   id: string;
   entity_id: string | null;

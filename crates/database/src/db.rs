@@ -66,8 +66,9 @@ impl LoomaDb {
         .map_err(|e| LoomaError::Database(format!("Failed to initialize vault_meta: {e}")))?;
 
         conn.execute(
-            "INSERT OR IGNORE INTO vault_meta (key, value, updated_at) VALUES ('version', '0.2.0', ?1)",
-            params![Utc::now().to_rfc3339()],
+            "INSERT INTO vault_meta (key, value, updated_at) VALUES ('version', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![env!("CARGO_PKG_VERSION"), Utc::now().to_rfc3339()],
         )
         .map_err(|e| LoomaError::Database(format!("Failed to initialize vault_meta: {e}")))?;
 
@@ -124,7 +125,7 @@ impl VaultService for LoomaDb {
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or_else(|_| "0.2.0".to_string());
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
 
         let created_at_str: Option<String> = conn
             .query_row(
@@ -658,6 +659,38 @@ impl AssetService for LoomaDb {
         let conn = self.conn.lock();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(count as u64)
+    }
+
+    fn count_assets_with_filter(&self, filter: &AssetFilter) -> LoomaResult<u64> {
+        let conn = self.conn.lock();
+        let mut query = "SELECT COUNT(*) FROM assets WHERE 1=1".to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(ref kind) = filter.kind {
+            let kind_str = serde_json::to_string(kind).unwrap_or_default().trim_matches('"').to_string();
+            query.push_str(" AND kind = ?");
+            params_vec.push(Box::new(kind_str));
+        }
+
+        if let Some(ref status) = filter.status {
+            let status_str = serde_json::to_string(status).unwrap_or_default().trim_matches('"').to_string();
+            query.push_str(" AND status = ?");
+            params_vec.push(Box::new(status_str));
+        }
+
+        if let Some(ref q) = filter.search_query {
+            query.push_str(" AND (path LIKE ? OR metadata_json LIKE ?)");
+            let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+
+        let mut stmt = conn.prepare(&query).map_err(|e| LoomaError::Database(e.to_string()))?;
+        let rusqlite_params: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| &**p).collect();
+        let count: i64 = stmt
+            .query_row(&*rusqlite_params, |r| r.get(0))
             .map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(count as u64)
     }
@@ -4102,5 +4135,156 @@ impl SourceRootService for LoomaDb {
             params![root_id, clean_rel],
         ).map_err(|e| LoomaError::Database(e.to_string()))?;
         Ok(())
+    }
+}
+
+impl SearchService for LoomaDb {
+    fn search_vault(&self, query: &str, category: Option<&str>, limit: usize) -> LoomaResult<VaultSearchResults> {
+        let conn = self.conn.lock();
+        let q = query.trim();
+        let cat = category.map(|c| c.trim().to_lowercase()).unwrap_or_else(|| "all".to_string());
+        let cap = if limit == 0 { 50 } else { limit.min(200) };
+
+        let mut items = Vec::new();
+
+        if q.is_empty() {
+            return Ok(VaultSearchResults {
+                items,
+                total_matches: 0,
+            });
+        }
+
+        let pattern = format!("%{}%", q);
+
+        // 1. Assets
+        if cat == "all" || cat == "assets" || cat == "asset" {
+            let mut stmt = conn.prepare(
+                "SELECT id, path, kind FROM assets
+                 WHERE path LIKE ?1 OR metadata_json LIKE ?1
+                 ORDER BY indexed_at DESC LIMIT ?2"
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let rows = stmt.query_map(params![pattern, cap as i64], |row| {
+                let id: String = row.get(0)?;
+                let path: Option<String> = row.get(1)?;
+                let kind: String = row.get(2)?;
+                let filename = path
+                    .as_ref()
+                    .and_then(|p| p.split(&['/', '\\'][..]).last())
+                    .unwrap_or(&id)
+                    .to_string();
+                let subtitle = path.unwrap_or_else(|| "无本地路径".to_string());
+
+                Ok(VaultSearchResultItem {
+                    id,
+                    category: "asset".to_string(),
+                    title: filename,
+                    subtitle,
+                    badge: Some(kind),
+                })
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for r in rows {
+                items.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+            }
+        }
+
+        // 2. Entities
+        if cat == "all" || cat == "entities" || cat == "entity" {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, entity_type, description FROM entities
+                 WHERE title LIKE ?1 OR description LIKE ?1 OR properties_json LIKE ?1
+                 ORDER BY updated_at DESC LIMIT ?2"
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let rows = stmt.query_map(params![pattern, cap as i64], |row| {
+                let id: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let entity_type: String = row.get(2)?;
+                let desc: Option<String> = row.get(3)?;
+
+                Ok(VaultSearchResultItem {
+                    id,
+                    category: "entity".to_string(),
+                    title,
+                    subtitle: desc.unwrap_or_else(|| format!("实体类型: {}", entity_type)),
+                    badge: Some(entity_type),
+                })
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for r in rows {
+                items.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+            }
+        }
+
+        // 3. Collections
+        if cat == "all" || cat == "collections" || cat == "collection" {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, description FROM collections
+                 WHERE title LIKE ?1 OR description LIKE ?1
+                 ORDER BY updated_at DESC LIMIT ?2"
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let rows = stmt.query_map(params![pattern, cap as i64], |row| {
+                let id: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let desc: Option<String> = row.get(2)?;
+
+                Ok(VaultSearchResultItem {
+                    id,
+                    category: "collection".to_string(),
+                    title,
+                    subtitle: desc.unwrap_or_else(|| "分组集合".to_string()),
+                    badge: Some("collection".to_string()),
+                })
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for r in rows {
+                items.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+            }
+        }
+
+        // 4. Memories
+        if cat == "all" || cat == "memories" || cat == "memory" {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, category, content FROM memories
+                 WHERE title LIKE ?1 OR content LIKE ?1 OR category LIKE ?1 OR metadata_json LIKE ?1
+                 ORDER BY updated_at DESC LIMIT ?2"
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let rows = stmt.query_map(params![pattern, cap as i64], |row| {
+                let id: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let mem_cat: Option<String> = row.get(2)?;
+                let content: String = row.get(3)?;
+                let snippet = if content.chars().count() > 60 {
+                    format!("{}...", content.chars().take(60).collect::<String>())
+                } else {
+                    content
+                };
+
+                Ok(VaultSearchResultItem {
+                    id,
+                    category: "memory".to_string(),
+                    title,
+                    subtitle: snippet,
+                    badge: mem_cat.or_else(|| Some("memory".to_string())),
+                })
+            }).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            for r in rows {
+                items.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+            }
+        }
+
+        let total_matches = items.len();
+        if cat == "all" && items.len() > cap {
+            items.truncate(cap);
+        }
+
+        Ok(VaultSearchResults {
+            items,
+            total_matches,
+        })
     }
 }

@@ -35,6 +35,25 @@ fn list_assets(filter: Option<AssetFilter>, state: State<'_, AppState>) -> Resul
 }
 
 #[tauri::command]
+fn count_assets(filter: Option<AssetFilter>, state: State<'_, AppState>) -> Result<u64, String> {
+    state.core
+        .count_assets_with_filter(&filter.unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn search_vault(
+    query: String,
+    category: Option<String>,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<VaultSearchResults, String> {
+    state.core
+        .search_vault(&query, category.as_deref(), limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_asset(id: String, state: State<'_, AppState>) -> Result<Option<Asset>, String> {
     state.core.get_asset(&id).map_err(|e| e.to_string())
 }
@@ -660,6 +679,8 @@ pub fn run() {
             get_vault_info,
             get_vault_stats,
             list_assets,
+            count_assets,
+            search_vault,
             get_asset,
             delete_asset,
             pick_folder,

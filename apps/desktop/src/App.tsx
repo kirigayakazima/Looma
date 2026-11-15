@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { AlertTriangle, X } from 'lucide-react';
 import { Sidebar, NavTab } from './components/Sidebar';
 import { Header } from './components/Header';
 import { HomeView } from './components/HomeView';
@@ -32,13 +33,23 @@ export const App: React.FC = () => {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [globalError, setGlobalError] = useState<string | null>(null);
 
-  // Safe invoke wrapper with mock fallback for web development preview
-  const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
+  // Safe invoke wrapper with structured error notification
+  const safeInvoke = async <T,>(
+    cmd: string,
+    args?: Record<string, unknown>,
+    silenceError = false
+  ): Promise<T | null> => {
     try {
       return await invoke<T>(cmd, args);
-    } catch (err) {
-      console.warn(`[Tauri IPC] '${cmd}' failed or running in web preview:`, err);
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      console.warn(`[Tauri IPC] '${cmd}' failed:`, errMsg);
+      if (!silenceError && !cmd.startsWith('read_asset_preview')) {
+        setGlobalError(`调用系统接口「${cmd}」返回错误: ${errMsg}`);
+        setTimeout(() => setGlobalError(null), 6000);
+      }
       return null;
     }
   };
@@ -53,7 +64,7 @@ export const App: React.FC = () => {
         // Fallback mock info if accessed outside Tauri webview
         setVaultInfo({
           name: t.home.defaultVaultName,
-          version: '0.2.0',
+          version: '0.5.0-dev',
           vault_path: 'D:/CodePackage/Persoanl/LoomaProject/vault',
           database_path: 'D:/CodePackage/Persoanl/LoomaProject/vault/.looma/vault.db',
           is_initialized: true,
@@ -64,7 +75,9 @@ export const App: React.FC = () => {
       const stats = await safeInvoke<VaultStats>('get_vault_stats');
       if (stats) setVaultStats(stats);
 
-      const assetList = await safeInvoke<Asset[]>('list_assets', { limit: 50, offset: 0 });
+      const assetList = await safeInvoke<Asset[]>('list_assets', {
+        filter: { limit: 50, offset: 0 },
+      });
       if (assetList) setAssets(assetList);
 
       const entityList = await safeInvoke<Entity[]>('list_entities', {});
@@ -267,6 +280,20 @@ export const App: React.FC = () => {
           setIsSearchOpen(false);
         }}
       />
+
+      {/* Global API Error Toast */}
+      {globalError && (
+        <div className="fixed bottom-4 right-4 z-50 max-w-md p-3.5 rounded-xl bg-red-950/90 border border-red-800 text-red-200 text-xs shadow-2xl flex items-start space-x-2.5 backdrop-blur animate-in slide-in-from-bottom">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+          <span className="flex-1 break-all leading-relaxed">{globalError}</span>
+          <button
+            onClick={() => setGlobalError(null)}
+            className="text-red-400 hover:text-red-200 p-0.5 rounded transition-colors"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 };

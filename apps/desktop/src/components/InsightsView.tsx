@@ -10,7 +10,7 @@ import {
   FolderPlus,
   CheckCheck,
 } from 'lucide-react';
-import { SmartInsightsReport, Suggestion, SuggestionType } from '../types';
+import { BatchApplyResult, SmartInsightsReport, Suggestion, SuggestionType } from '../types';
 import { useI18n } from '../i18n';
 
 interface InsightsViewProps {

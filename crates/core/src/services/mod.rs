@@ -6,7 +6,7 @@ use crate::models::{
     Asset, AssetFilter, AssetLifecycle, AssetScanSuppression, BackupResult, Collection,
     CollectionItem, Entity, EntityFilter, ExperienceEntry, ExperienceFilter, ExperienceLink,
     IntegrityRepairPlan, Memory, Relation, RestoreResult, SourceRoot, SourceRootInspection,
-    TimelineFilter, TimelineItem, VaultDoctorReport, VaultInfo, VaultManifest, VaultStats,
+    TimelineFilter, TimelineItem, VaultDoctorReport, VaultInfo, VaultManifest, VaultSearchResults, VaultStats,
 };
 
 pub trait VaultService: Send + Sync {
@@ -23,6 +23,7 @@ pub trait AssetService: Send + Sync {
     fn upsert_asset(&self, asset: &Asset) -> LoomaResult<()>;
     fn delete_asset(&self, id: &str) -> LoomaResult<bool>;
     fn count_assets(&self) -> LoomaResult<u64>;
+    fn count_assets_with_filter(&self, filter: &AssetFilter) -> LoomaResult<u64>;
 }
 
 pub trait EntityService: Send + Sync {
@@ -144,6 +145,10 @@ pub trait SourceRootService: Send + Sync {
     fn list_suppressions(&self, root_id: Option<&str>) -> LoomaResult<Vec<AssetScanSuppression>>;
     fn add_suppression(&self, root_id: &str, relative_path: &str, reason: Option<&str>) -> LoomaResult<()>;
     fn remove_suppression(&self, root_id: &str, relative_path: &str) -> LoomaResult<()>;
+}
+
+pub trait SearchService: Send + Sync {
+    fn search_vault(&self, query: &str, category: Option<&str>, limit: usize) -> LoomaResult<VaultSearchResults>;
 }
 
 pub type ScanProgressCallback = Box<dyn FnMut(crate::models::ScanProgress) + Send>;
