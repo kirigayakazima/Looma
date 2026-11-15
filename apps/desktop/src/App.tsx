@@ -64,7 +64,7 @@ export const App: React.FC = () => {
         // Fallback mock info if accessed outside Tauri webview
         setVaultInfo({
           name: t.home.defaultVaultName,
-          version: '0.5.0-dev',
+          version: '0.6.0',
           vault_path: 'D:/CodePackage/Persoanl/LoomaProject/vault',
           database_path: 'D:/CodePackage/Persoanl/LoomaProject/vault/.looma/vault.db',
           is_initialized: true,

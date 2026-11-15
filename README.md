@@ -55,6 +55,9 @@ Looma 的目标是帮用户把这些内容有机地编织成一个整体，同�
 * **本地游戏候选安全识别 (Candidate Detection)**：
   * 基于 `.exe` 及子目录特征快速嗅探潜在游戏目录；
   * **绝不自动污染数据库**：扫描识别结果以候选卡片呈现，经用户审查确认后一键建立游戏档案或关联为附加位置；
+* **Switch 主机游玩记录导入 (NX Activity Sync)**：一键解析 Switch 游玩历史，自动同步游玩时长、首次/末次游玩日期与启动次数；支持详情页时长卡片与一键通关足迹补录；
+* **多图源高画质封面引擎 (Multi-Source Cover Engine)**：集成 Steam 官方素材库（带多级级联回退）、Nintendo Switch Nlib 社区接口与 Bangumi 数据库，一键批量全自动下载并转码为 WebP Managed 资产；与保险库备份/恢复完整联动；
+* **本地 AI 语义消歧 (Local AI Proxy)**：无缝直连本地 OpenAI 兼容反代（端口 8081），自动清洗不规范、汉化魔改与带符号的游戏目录名，智能反查官方规范译名并拉取封面；
 * **直达与封面指定**：卡片支持一键呼出 Windows 资源管理器直接定位游戏目录，并可将任意关联的游戏截图/原画一键指定为卡片封面。
 
 #### 📁 本地资产与增量扫描器 (Assets & Incremental Scanner)
@@ -192,7 +195,7 @@ cargo build --release -p looma-cli -p looma-mcp
 Looma is a local-first, user-owned, extensible personal digital OS and media weaving vault that organizes your personal files, cultural works, memories, and timelines without requiring you to surrender ownership of your files.
 
 - **Online Interactive Demo**: Try the full interactive web demo directly in your browser: [kirigayakazima.github.io/Looma](https://kirigayakazima.github.io/Looma/).
-- **Personal Game Library**: Aggregates games across hard drives (C:, D:, E:, F:), safe Candidate Detection without database pollution, multi-location backup linking, and direct Windows file manager integration.
+- **Personal Game Library**: Aggregates games across hard drives (C:, D:, E:, F:), safe Candidate Detection without database pollution, multi-location backup linking, Nintendo Switch playtime activity sync (NX Activity Log), multi-source official cover art fetching (Steam, Nlib, Bangumi), local AI-driven title normalization, and direct Windows file manager integration.
 - **Personal Media Tracking**: Structural tracking for Anime, Manga, Games, Books, Movies & Music with interactive progress steppers and direct system browser openers.
 - **Reference Mode**: Weaves assets without duplicating, relocating, or altering your existing disk files.
 - **Offline & Private**: Zero telemetry, no cloud dependency, completely offline.
