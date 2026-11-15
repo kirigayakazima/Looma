@@ -1064,6 +1064,33 @@ impl LoomaCore {
         Ok(analysis)
     }
 
+    fn download_steam_cover_with_fallbacks(
+        &self,
+        actor: &str,
+        work_id: &str,
+        app_id_str: &str,
+        tiny_image: Option<&str>,
+    ) -> bool {
+        let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{app_id_str}/library_600x900.jpg");
+        if self.download_and_set_work_cover(actor, work_id, &capsule_url, false).is_ok() {
+            return true;
+        }
+        let header_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{app_id_str}/header.jpg");
+        if self.download_and_set_work_cover(actor, work_id, &header_url, false).is_ok() {
+            return true;
+        }
+        let cdn_header = format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id_str}/header.jpg");
+        if self.download_and_set_work_cover(actor, work_id, &cdn_header, false).is_ok() {
+            return true;
+        }
+        if let Some(tiny) = tiny_image {
+            if self.download_and_set_work_cover(actor, work_id, tiny, false).is_ok() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn download_and_set_work_cover(
         &self,
         actor: &str,
@@ -1223,6 +1250,17 @@ impl LoomaCore {
                                             description: Some(format!("Steam 600×900 海报 | AppID: {id}")),
                                         });
                                     }
+                                    if let Some(tiny) = item.get("tiny_image").and_then(|v| v.as_str()) {
+                                        if !candidates.iter().any(|c| c.image_url == tiny) {
+                                            candidates.push(CoverCandidate {
+                                                provider: "steam".to_string(),
+                                                title: format!("{name} (横版封面)"),
+                                                image_url: tiny.to_string(),
+                                                aspect_ratio: "landscape".to_string(),
+                                                description: Some(format!("Steam 商店海报 | AppID: {id}")),
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1350,8 +1388,7 @@ impl LoomaCore {
             });
 
             if let Some(appid) = steam_appid {
-                let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg");
-                if self.download_and_set_work_cover(actor, &work.id, &capsule_url, false).is_ok() {
+                if self.download_steam_cover_with_fallbacks(actor, &work.id, &appid, None) {
                     matched_count += 1;
                     matched_titles.push(work.title.clone());
                     continue;
@@ -1370,8 +1407,8 @@ impl LoomaCore {
                             if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
                                 if let Some(first) = items.first() {
                                     if let Some(app_id) = first.get("id").and_then(|v| v.as_u64()) {
-                                        let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{app_id}/library_600x900.jpg");
-                                        if self.download_and_set_work_cover(actor, &work.id, &capsule_url, false).is_ok() {
+                                        let tiny = first.get("tiny_image").and_then(|v| v.as_str());
+                                        if self.download_steam_cover_with_fallbacks(actor, &work.id, &app_id.to_string(), tiny) {
                                             matched_count += 1;
                                             matched_titles.push(work.title.clone());
                                             found = true;
@@ -1396,8 +1433,7 @@ impl LoomaCore {
                     if let Some(appid) = &analysis.steam_appid {
                         let id_clean = appid.trim();
                         if id_clean.chars().all(|c| c.is_ascii_digit()) && !id_clean.is_empty() {
-                            let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{id_clean}/library_600x900.jpg");
-                            if self.download_and_set_work_cover(actor, &work.id, &capsule_url, false).is_ok() {
+                            if self.download_steam_cover_with_fallbacks(actor, &work.id, id_clean, None) {
                                 matched_count += 1;
                                 matched_titles.push(format!("{} (AI -> {})", work.title, analysis.canonical_title));
                                 ai_matched = true;
@@ -1420,21 +1456,34 @@ impl LoomaCore {
                         }
                     }
 
-                    // 4.3 Try searching Steam for canonical title from AI
-                    if !ai_matched && !analysis.canonical_title.trim().is_empty() {
-                        let encoded = Self::percent_encode(&analysis.canonical_title);
-                        let search_url = format!("https://store.steampowered.com/api/storesearch/?term={encoded}&cc=US");
-                        if let Ok(resp) = ureq::get(&search_url).timeout(std::time::Duration::from_secs(5)).call() {
-                            if resp.status() == 200 {
-                                if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
-                                    if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
-                                        if let Some(first) = items.first() {
-                                            if let Some(app_id) = first.get("id").and_then(|v| v.as_u64()) {
-                                                let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{app_id}/library_600x900.jpg");
-                                                if self.download_and_set_work_cover(actor, &work.id, &capsule_url, false).is_ok() {
-                                                    matched_count += 1;
-                                                    matched_titles.push(format!("{} (AI -> {})", work.title, analysis.canonical_title));
-                                                    ai_matched = true;
+                    // 4.3 Try searching Steam for canonical title or English title from AI
+                    if !ai_matched {
+                        let mut terms = Vec::new();
+                        if !analysis.canonical_title.trim().is_empty() {
+                            terms.push(analysis.canonical_title.trim());
+                        }
+                        if let Some(en) = &analysis.english_title {
+                            if !en.trim().is_empty() && !terms.contains(&en.trim()) {
+                                terms.push(en.trim());
+                            }
+                        }
+
+                        for term in terms {
+                            let encoded = Self::percent_encode(term);
+                            let search_url = format!("https://store.steampowered.com/api/storesearch/?term={encoded}&cc=US");
+                            if let Ok(resp) = ureq::get(&search_url).timeout(std::time::Duration::from_secs(5)).call() {
+                                if resp.status() == 200 {
+                                    if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
+                                        if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
+                                            if let Some(first) = items.first() {
+                                                if let Some(app_id) = first.get("id").and_then(|v| v.as_u64()) {
+                                                    let tiny = first.get("tiny_image").and_then(|v| v.as_str());
+                                                    if self.download_steam_cover_with_fallbacks(actor, &work.id, &app_id.to_string(), tiny) {
+                                                        matched_count += 1;
+                                                        matched_titles.push(format!("{} (AI -> {})", work.title, analysis.canonical_title));
+                                                        ai_matched = true;
+                                                        break;
+                                                    }
                                                 }
                                             }
                                         }
