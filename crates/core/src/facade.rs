@@ -1122,6 +1122,8 @@ impl LoomaCore {
             "nlib"
         } else if url.contains("steam") {
             "steam"
+        } else if url.contains("bgm.tv") {
+            "bangumi"
         } else {
             "online"
         };
@@ -1260,6 +1262,55 @@ impl LoomaCore {
                                                 description: Some(format!("Steam 商店海报 | AppID: {id}")),
                                             });
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3.1 Online search on Bangumi (covers console, retro, Nintendo, anime, indie games)
+        if query_text.len() >= 2 && !query_text.chars().all(|c| c.is_ascii_hexdigit()) {
+            let encoded_bgm = Self::percent_encode(&query_text);
+            let bgm_url = format!("https://api.bgm.tv/search/subject/{encoded_bgm}?type=4");
+            if let Ok(resp) = ureq::get(&bgm_url)
+                .set("User-Agent", "Looma/0.6 (+https://github.com/kirigayakazima/Looma)")
+                .timeout(std::time::Duration::from_secs(5))
+                .call()
+            {
+                if resp.status() == 200 {
+                    if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
+                        if let Some(list) = val.get("list").and_then(|v| v.as_array()) {
+                            for item in list.iter().take(6) {
+                                let name = item.get("name_cn").and_then(|v| v.as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .or_else(|| item.get("name").and_then(|v| v.as_str()));
+                                let orig_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                let img_url = item.get("images")
+                                    .and_then(|img| img.get("large").or_else(|| img.get("common")))
+                                    .and_then(|v| v.as_str());
+
+                                if let (Some(n), Some(u)) = (name, img_url) {
+                                    let secure_url = if u.starts_with("http://") {
+                                        u.replacen("http://", "https://", 1)
+                                    } else {
+                                        u.to_string()
+                                    };
+                                    if !candidates.iter().any(|c| c.image_url == secure_url) {
+                                        let desc = if !orig_name.is_empty() && orig_name != n {
+                                            format!("Bangumi 官方库 | 原名: {orig_name}")
+                                        } else {
+                                            "Bangumi 官方全平台库".to_string()
+                                        };
+                                        candidates.push(CoverCandidate {
+                                            provider: "bangumi".to_string(),
+                                            title: n.to_string(),
+                                            image_url: secure_url,
+                                            aspect_ratio: "2:3".to_string(),
+                                            description: Some(desc),
+                                        });
                                     }
                                 }
                             }
@@ -1481,6 +1532,54 @@ impl LoomaCore {
                                                     if self.download_steam_cover_with_fallbacks(actor, &work.id, &app_id.to_string(), tiny) {
                                                         matched_count += 1;
                                                         matched_titles.push(format!("{} (AI -> {})", work.title, analysis.canonical_title));
+                                                        ai_matched = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 4.4 Try searching Bangumi for canonical or English title from AI (for Nintendo, console, retro)
+                    if !ai_matched {
+                        let mut terms = Vec::new();
+                        if !analysis.canonical_title.trim().is_empty() {
+                            terms.push(analysis.canonical_title.trim());
+                        }
+                        if let Some(en) = &analysis.english_title {
+                            if !en.trim().is_empty() && !terms.contains(&en.trim()) {
+                                terms.push(en.trim());
+                            }
+                        }
+
+                        for term in terms {
+                            let encoded_bgm = Self::percent_encode(term);
+                            let bgm_url = format!("https://api.bgm.tv/search/subject/{encoded_bgm}?type=4");
+                            if let Ok(resp) = ureq::get(&bgm_url)
+                                .set("User-Agent", "Looma/0.6 (+https://github.com/kirigayakazima/Looma)")
+                                .timeout(std::time::Duration::from_secs(5))
+                                .call()
+                            {
+                                if resp.status() == 200 {
+                                    if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
+                                        if let Some(list) = val.get("list").and_then(|v| v.as_array()) {
+                                            if let Some(first) = list.first() {
+                                                if let Some(img_url) = first.get("images")
+                                                    .and_then(|img| img.get("large").or_else(|| img.get("common")))
+                                                    .and_then(|v| v.as_str())
+                                                {
+                                                    let secure_url = if img_url.starts_with("http://") {
+                                                        img_url.replacen("http://", "https://", 1)
+                                                    } else {
+                                                        img_url.to_string()
+                                                    };
+                                                    if self.download_and_set_work_cover(actor, &work.id, &secure_url, false).is_ok() {
+                                                        matched_count += 1;
+                                                        matched_titles.push(format!("{} (Bangumi -> {})", work.title, analysis.canonical_title));
                                                         ai_matched = true;
                                                         break;
                                                     }

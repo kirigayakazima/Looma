@@ -127,7 +127,7 @@ export const OnlineCoverModal: React.FC<OnlineCoverModalProps> = ({
                 在线匹配官方封面 — 《{workTitle}》
               </h3>
               <p className="text-xs text-neutral-400 mt-0.5">
-                实时检索 Nintendo Switch (Nlib) 与 Steam 官方海报素材库
+                实时检索 Steam 官方海报、Nintendo Switch (Nlib) 与 Bangumi 游戏数据库
               </p>
             </div>
           </div>
