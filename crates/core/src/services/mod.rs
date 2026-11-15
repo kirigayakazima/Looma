@@ -31,6 +31,7 @@ pub trait EntityService: Send + Sync {
     fn get_entity_by_id(&self, id: &str) -> LoomaResult<Option<Entity>>;
     fn create_entity(&self, entity: &Entity) -> LoomaResult<()>;
     fn update_entity(&self, entity: &Entity) -> LoomaResult<()>;
+    fn update_entity_cas(&self, entity: &Entity, expected_updated_at: &chrono::DateTime<chrono::Utc>) -> LoomaResult<bool>;
     fn delete_entity(&self, id: &str) -> LoomaResult<bool>;
     fn count_entities(&self) -> LoomaResult<u64>;
     fn repair_work_integrity(&self, work_id: &str, plan: &IntegrityRepairPlan) -> LoomaResult<()>;

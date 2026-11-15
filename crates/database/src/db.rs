@@ -851,6 +851,26 @@ impl EntityService for LoomaDb {
         Ok(())
     }
 
+    fn update_entity_cas(&self, entity: &Entity, expected_updated_at: &DateTime<Utc>) -> LoomaResult<bool> {
+        let conn = self.conn.lock();
+        let props_str = serde_json::to_string(&entity.properties).unwrap_or_else(|_| "{}".to_string());
+        let rows = conn.execute(
+            "UPDATE entities SET entity_type = ?2, title = ?3, description = ?4, properties_json = ?5, updated_at = ?6
+             WHERE id = ?1 AND updated_at = ?7",
+            params![
+                entity.id,
+                entity.entity_type,
+                entity.title,
+                entity.description,
+                props_str,
+                entity.updated_at.to_rfc3339(),
+                expected_updated_at.to_rfc3339()
+            ],
+        )
+        .map_err(|e| LoomaError::Database(format!("Failed to update entity with CAS: {e}")))?;
+        Ok(rows > 0)
+    }
+
     fn delete_entity(&self, id: &str) -> LoomaResult<bool> {
         let conn = self.conn.lock();
         let rows = conn

@@ -97,6 +97,17 @@ export const App: React.FC = () => {
     loadData();
   }, [loadData]);
 
+  // Global IPC error listener from child components
+  useEffect(() => {
+    const handleIpcError = (e: Event) => {
+      const msg = (e as CustomEvent<string>).detail;
+      setGlobalError(msg);
+      setTimeout(() => setGlobalError(null), 6000);
+    };
+    window.addEventListener('looma-ipc-error', handleIpcError);
+    return () => window.removeEventListener('looma-ipc-error', handleIpcError);
+  }, []);
+
   // Global Ctrl+K / Cmd+K listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

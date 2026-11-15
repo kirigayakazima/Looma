@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
   FolderArchive,
@@ -29,6 +28,7 @@ import {
 } from 'lucide-react';
 import { Entity, Asset, ScanProgress, ScanSummary, Relation, ThumbnailResult } from '../types';
 import { useI18n } from '../i18n';
+import { safeInvoke } from '../ipc';
 
 const AssetThumbnail: React.FC<{ asset: Asset }> = ({ asset }) => {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
@@ -38,10 +38,10 @@ const AssetThumbnail: React.FC<{ asset: Asset }> = ({ asset }) => {
     let active = true;
     if (asset.kind === 'image' && asset.path) {
       setLoading(true);
-      invoke<ThumbnailResult | null>('get_asset_thumbnail', {
+      safeInvoke<ThumbnailResult | null>('get_asset_thumbnail', {
         assetId: asset.id,
         maxDimension: 320,
-      })
+      }, true)
         .then((res) => {
           if (active && res?.data_url) {
             setThumbUrl(res.data_url);
@@ -97,6 +97,40 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, entities, onRefr
   const [selectedKind, setSelectedKind] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
+  // Server-side pagination states
+  const [currentPage, setCurrentPage] = useState<number>(0);
+  const [pageSize] = useState<number>(50);
+  const [totalCount, setTotalCount] = useState<number>(assets.length);
+  const [serverAssets, setServerAssets] = useState<Asset[]>([]);
+  const [loadingAssets, setLoadingAssets] = useState<boolean>(false);
+
+  const fetchPage = useCallback(async (page: number, kind: string) => {
+    setLoadingAssets(true);
+    try {
+      const filter = {
+        kind: kind === 'all' ? undefined : kind,
+        limit: pageSize,
+        offset: page * pageSize,
+      };
+      const [paged, count] = await Promise.all([
+        safeInvoke<Asset[]>('list_assets', { filter }),
+        safeInvoke<number>('count_assets', { filter }),
+      ]);
+      if (paged) {
+        setServerAssets(paged);
+      }
+      if (typeof count === 'number') {
+        setTotalCount(count);
+      }
+    } finally {
+      setLoadingAssets(false);
+    }
+  }, [pageSize]);
+
+  useEffect(() => {
+    fetchPage(currentPage, selectedKind);
+  }, [fetchPage, currentPage, selectedKind]);
+
   // Scanner modal & progress states
   const [isScanModalOpen, setIsScanModalOpen] = useState(false);
   const [scanPath, setScanPath] = useState('');
@@ -112,16 +146,6 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, entities, onRefr
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [assetRelations, setAssetRelations] = useState<Relation[]>([]);
   const [showLinkEntityDropdown, setShowLinkEntityDropdown] = useState(false);
-
-  // Helper for safe IPC invocation
-  const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
-    try {
-      return await invoke<T>(cmd, args);
-    } catch (err) {
-      console.warn(`[Tauri IPC] '${cmd}' failed:`, err);
-      return null;
-    }
-  };
 
   // Listen to scan-progress events from Rust
   useEffect(() => {
@@ -328,8 +352,9 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, entities, onRefr
   };
 
   // Filter & Search assets
+  const sourceAssets = serverAssets.length > 0 ? serverAssets : assets;
   const filteredAssets = useMemo(() => {
-    return assets.filter((asset) => {
+    return sourceAssets.filter((asset) => {
       // Kind filter
       if (selectedKind !== 'all' && asset.kind !== selectedKind) {
         return false;
@@ -345,7 +370,7 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, entities, onRefr
       }
       return true;
     });
-  }, [assets, selectedKind, searchQuery]);
+  }, [sourceAssets, selectedKind, searchQuery]);
 
   const kindOptions: { key: string; label: string }[] = [
     { key: 'all', label: t.assets.filterAll },
@@ -617,6 +642,35 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, entities, onRefr
                 })}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Pagination Controls */}
+      {totalCount > pageSize && (
+        <div className="flex items-center justify-between px-4 py-2.5 bg-neutral-900/60 border border-neutral-800 rounded-xl text-xs text-neutral-400">
+          <div>
+            第 <span className="text-neutral-200 font-mono font-medium">{currentPage + 1}</span> 页 / 共{' '}
+            <span className="text-neutral-200 font-mono font-medium">
+              {Math.max(1, Math.ceil(totalCount / pageSize))}
+            </span>{' '}
+            页 (共 <span className="text-neutral-200 font-mono">{totalCount}</span> 条资产)
+          </div>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
+              disabled={currentPage === 0 || loadingAssets}
+              className="px-3 py-1 rounded bg-neutral-800 hover:bg-neutral-750 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-200 transition-colors"
+            >
+              上一页
+            </button>
+            <button
+              onClick={() => setCurrentPage((p) => p + 1)}
+              disabled={(currentPage + 1) * pageSize >= totalCount || loadingAssets}
+              className="px-3 py-1 rounded bg-neutral-800 hover:bg-neutral-750 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-200 transition-colors"
+            >
+              下一页
+            </button>
           </div>
         </div>
       )}

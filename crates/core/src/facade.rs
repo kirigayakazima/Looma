@@ -163,6 +163,29 @@ pub struct LoomaCore {
     scan_engine: Arc<std::sync::RwLock<Option<Arc<dyn ScanEngine>>>>,
 }
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static CONCURRENT_THUMBNAIL_JOBS: AtomicUsize = AtomicUsize::new(0);
+const MAX_CONCURRENT_THUMBNAIL_DECODES: usize = 4;
+
+struct ThumbnailThrottleGuard;
+
+impl ThumbnailThrottleGuard {
+    fn acquire() -> Self {
+        while CONCURRENT_THUMBNAIL_JOBS.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_THUMBNAIL_DECODES {
+            CONCURRENT_THUMBNAIL_JOBS.fetch_sub(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        ThumbnailThrottleGuard
+    }
+}
+
+impl Drop for ThumbnailThrottleGuard {
+    fn drop(&mut self) {
+        CONCURRENT_THUMBNAIL_JOBS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl LoomaCore {
     pub fn new(repo: Arc<dyn VaultRepository>) -> Self {
         Self {
@@ -395,9 +418,23 @@ impl LoomaCore {
             }
         }
 
+        // CAS check: if caller passed an entity with an older updated_at than what is in DB
+        if entity.updated_at < existing.updated_at {
+            return Err(LoomaError::Validation(format!(
+                "Stale update conflict for entity '{}': loaded at {}, but current DB version is {}",
+                entity.id, entity.updated_at, existing.updated_at
+            )));
+        }
+
         final_entity.updated_at = Utc::now();
 
-        self.repo.update_entity(&final_entity)?;
+        let cas_ok = self.repo.update_entity_cas(&final_entity, &existing.updated_at)?;
+        if !cas_ok {
+            return Err(LoomaError::Validation(format!(
+                "Concurrent update conflict: entity '{}' was modified concurrently by another transaction",
+                final_entity.id
+            )));
+        }
         self.record_audit(
             actor,
             "entity.update",
@@ -2637,6 +2674,16 @@ impl LoomaCore {
             return Ok(None);
         }
 
+        // Bounded safety: if file is larger than 100MB, avoid synchronous full-image memory spikes
+        if let Ok(meta) = source_path.metadata() {
+            if meta.len() > 100 * 1024 * 1024 {
+                return Err(LoomaError::Validation(format!(
+                    "Image file size ({} MB) exceeds safety threshold of 100MB for thumbnail generation",
+                    meta.len() / (1024 * 1024)
+                )));
+            }
+        }
+
         let vault_info = self.get_vault_info()?;
         let cache_dir = if vault_info.vault_path.as_os_str() == ":memory:" {
             std::env::temp_dir().join("looma_test_cache").join("thumbnails")
@@ -2661,6 +2708,24 @@ impl LoomaCore {
 
         let is_newly_generated = needs_generation;
         if needs_generation {
+            let _guard = ThumbnailThrottleGuard::acquire();
+
+            let reader = image::ImageReader::open(source_path)
+                .map_err(|e| LoomaError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to open image {}: {}", source_path.display(), e))))?
+                .with_guessed_format()
+                .map_err(|e| LoomaError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to guess format: {}", e))))?;
+
+            // Bounded safety: Check header dimensions before full decompression
+            if let Ok((width, height)) = reader.into_dimensions() {
+                let megapixels = (width as u64) * (height as u64);
+                if megapixels > 64_000_000 {
+                    return Err(LoomaError::Validation(format!(
+                        "Image resolution ({}x{} = {} MP) exceeds safety threshold of 64 MP",
+                        width, height, megapixels / 1_000_000
+                    )));
+                }
+            }
+
             let reader = image::ImageReader::open(source_path)
                 .map_err(|e| LoomaError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to open image {}: {}", source_path.display(), e))))?
                 .with_guessed_format()
