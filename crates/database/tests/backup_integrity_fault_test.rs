@@ -34,8 +34,8 @@ fn test_backup_integrity_and_fault_injection() {
     let backup_res = core.export_backup("author", export_dir.path()).unwrap();
     let backup_path = std::path::PathBuf::from(&backup_res.backup_path);
 
-    // Verify manifest schema_version is 4 (all 4 migrations applied)
-    assert_eq!(backup_res.manifest.schema_version, 4);
+    // Verify manifest schema_version is 5 (all 5 migrations applied)
+    assert_eq!(backup_res.manifest.schema_version, 5);
     assert!(backup_res.manifest.checksums.contains_key("vault_dump.json"));
 
     // 3. Fault Injection 1: Tamper with vault_dump.json content

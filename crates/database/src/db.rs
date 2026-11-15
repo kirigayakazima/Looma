@@ -4605,4 +4605,163 @@ impl GameActivityService for LoomaDb {
         }
         Ok(list)
     }
+
+    fn commit_switch_import(
+        &self,
+        actor: &str,
+        decision: &SwitchImportDecision,
+    ) -> LoomaResult<SwitchImportOutcome> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut imported_records = 0;
+        let mut created_works = 0;
+        let mut updated_records = 0;
+        let mut skipped_records = 0;
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        for item in &decision.items {
+            let work_id = match &item.action {
+                SwitchImportAction::Skip => {
+                    skipped_records += 1;
+                    continue;
+                }
+                SwitchImportAction::LinkExistingWork { work_id } => {
+                    let exists: bool = tx.query_row(
+                        "SELECT 1 FROM entities WHERE id = ?1",
+                        params![work_id],
+                        |_| Ok(true),
+                    ).optional().map_err(|e| LoomaError::Database(e.to_string()))?.unwrap_or(false);
+
+                    if !exists {
+                        return Err(LoomaError::NotFound(format!("Target work entity not found: {work_id}")));
+                    }
+                    work_id.clone()
+                }
+                SwitchImportAction::CreateNewWork { title } => {
+                    let entity = Entity::new_work(
+                        title,
+                        WorkType::Game,
+                        RecordStatus::InProgress,
+                        None,
+                        None,
+                    );
+                    let props_json = serde_json::to_string(&entity.properties)
+                        .map_err(LoomaError::Serialization)?;
+
+                    tx.execute(
+                        "INSERT INTO entities (id, entity_type, title, description, properties_json, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            entity.id,
+                            entity.entity_type,
+                            entity.title,
+                            entity.description,
+                            props_json,
+                            entity.created_at.to_rfc3339(),
+                            entity.updated_at.to_rfc3339(),
+                        ],
+                    ).map_err(|e| LoomaError::Database(format!("Failed to create work entity in tx: {e}")))?;
+
+                    created_works += 1;
+                    entity.id
+                }
+            };
+
+            let existing_info: Option<(String, u64)> = tx.query_row(
+                "SELECT id, peak_seen_seconds FROM game_activity_records WHERE provider = ?1 AND source_key = ?2 AND external_id = ?3",
+                params!["switch_nx", decision.selected_user_id, item.external_id],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)),
+            ).optional().map_err(|e| LoomaError::Database(e.to_string()))?;
+
+            let (record_id, peak_seen) = match existing_info {
+                Some((eid, old_peak)) => {
+                    updated_records += 1;
+                    (eid, old_peak.max(item.playtime_seconds))
+                }
+                None => {
+                    (uuid::Uuid::new_v4().to_string(), item.playtime_seconds)
+                }
+            };
+
+            let first_str = item.first_played_at.map(|t| t.to_rfc3339());
+            let last_str = item.last_played_at.map(|t| t.to_rfc3339());
+            let label = decision.user_label.as_deref().unwrap_or("Switch");
+
+            tx.execute(
+                "INSERT INTO game_activity_records (
+                    id, work_id, provider, source_key, external_id, source_label, title_hint,
+                    playtime_seconds, peak_seen_seconds, launch_count, first_played_at, last_played_at,
+                    source_exported_at, last_import_sha256, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                ON CONFLICT(provider, source_key, external_id) DO UPDATE SET
+                    work_id = excluded.work_id,
+                    source_label = excluded.source_label,
+                    title_hint = excluded.title_hint,
+                    playtime_seconds = excluded.playtime_seconds,
+                    peak_seen_seconds = excluded.peak_seen_seconds,
+                    launch_count = excluded.launch_count,
+                    first_played_at = excluded.first_played_at,
+                    last_played_at = excluded.last_played_at,
+                    source_exported_at = excluded.source_exported_at,
+                    last_import_sha256 = excluded.last_import_sha256,
+                    updated_at = excluded.updated_at",
+                params![
+                    record_id,
+                    work_id,
+                    "switch_nx",
+                    decision.selected_user_id,
+                    item.external_id,
+                    label,
+                    item.title_hint,
+                    item.playtime_seconds as i64,
+                    peak_seen as i64,
+                    item.launch_count.map(|c| c as i64),
+                    first_str,
+                    last_str,
+                    decision.source_exported_at,
+                    decision.file_sha256,
+                    now_str,
+                ],
+            ).map_err(|e| LoomaError::Database(format!("Failed to upsert game activity in tx: {e}")))?;
+
+            imported_records += 1;
+        }
+
+        let audit_id = uuid::Uuid::new_v4().to_string();
+        let details = serde_json::json!({
+            "provider": "switch_nx",
+            "user_id": decision.selected_user_id,
+            "imported": imported_records,
+            "created_works": created_works,
+            "updated": updated_records,
+            "skipped": skipped_records,
+            "file_sha256": decision.file_sha256,
+        }).to_string();
+
+        tx.execute(
+            "INSERT INTO audit_logs (id, timestamp, actor, operation, target_type, target_id, result, details_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                audit_id,
+                now_str,
+                actor,
+                "activity.switch_import",
+                "game_activity_records",
+                decision.selected_user_id,
+                "success",
+                details,
+            ],
+        ).map_err(|e| LoomaError::Database(format!("Failed to record audit log: {e}")))?;
+
+        tx.commit().map_err(|e| LoomaError::Database(format!("Failed to commit switch import tx: {e}")))?;
+
+        Ok(SwitchImportOutcome {
+            imported_records,
+            created_works,
+            updated_records,
+            skipped_records,
+        })
+    }
 }

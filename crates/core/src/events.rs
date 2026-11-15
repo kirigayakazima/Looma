@@ -30,6 +30,7 @@ pub enum DomainEvent {
     AssetUntracked { id: String, reason: Option<String> },
     AssetTrackingResumed { id: String },
     BackupCompleted { path: String, duration_ms: u64 },
+    GameActivityImported { count: usize, provider: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

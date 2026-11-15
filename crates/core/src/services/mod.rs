@@ -6,6 +6,7 @@ use crate::models::{
     Asset, AssetFilter, AssetLifecycle, AssetScanSuppression, BackupResult, Collection,
     CollectionItem, Entity, EntityFilter, ExperienceEntry, ExperienceFilter, ExperienceLink,
     GameActivityRecord, IntegrityRepairPlan, Memory, Relation, RestoreResult, SourceRoot, SourceRootInspection,
+    SwitchImportDecision, SwitchImportOutcome,
     TimelineFilter, TimelineItem, VaultDoctorReport, VaultInfo, VaultManifest, VaultSearchResults, VaultStats,
 };
 
@@ -158,6 +159,7 @@ pub trait GameActivityService: Send + Sync {
     fn upsert_game_activity(&self, record: &GameActivityRecord) -> LoomaResult<()>;
     fn delete_game_activity(&self, id: &str) -> LoomaResult<bool>;
     fn list_all_game_activities(&self) -> LoomaResult<Vec<GameActivityRecord>>;
+    fn commit_switch_import(&self, actor: &str, decision: &SwitchImportDecision) -> LoomaResult<SwitchImportOutcome>;
 }
 
 pub type ScanProgressCallback = Box<dyn FnMut(crate::models::ScanProgress) + Send>;

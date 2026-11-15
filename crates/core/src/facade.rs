@@ -2454,6 +2454,208 @@ impl LoomaCore {
         self.repo.delete_game_activity(id)
     }
 
+    pub fn preview_switch_import(
+        &self,
+        json_content: &str,
+        user_id: Option<&str>,
+    ) -> LoomaResult<SwitchImportPreview> {
+        if json_content.len() > 50 * 1024 * 1024 {
+            return Err(LoomaError::Validation("JSON file is too large (exceeds 50MB limit)".to_string()));
+        }
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(json_content.as_bytes());
+        let file_sha256 = format!("{:x}", hasher.finalize());
+
+        let export: NxActivityLogExport = serde_json::from_str(json_content)
+            .map_err(|e| LoomaError::Validation(format!("Invalid NX Activity Log JSON: {e}")))?;
+
+        if export.users.is_empty() {
+            return Err(LoomaError::Validation("No user profiles found in export".to_string()));
+        }
+
+        let profiles: Vec<SwitchProfilePreview> = export
+            .users
+            .iter()
+            .map(|u| SwitchProfilePreview {
+                user_id: u.id.trim().to_lowercase(),
+                user_name: u.name.clone().unwrap_or_else(|| "Unknown".to_string()),
+                title_count: u.titles.len(),
+            })
+            .collect();
+
+        let selected_user = if let Some(uid) = user_id {
+            let norm = uid.trim().to_lowercase();
+            export
+                .users
+                .iter()
+                .find(|u| u.id.trim().to_lowercase() == norm)
+                .ok_or_else(|| LoomaError::NotFound(format!("Profile '{uid}' not found in export")))?
+        } else {
+            &export.users[0]
+        };
+
+        let selected_user_id = selected_user.id.trim().to_lowercase();
+        let selected_user_name = selected_user.name.clone().unwrap_or_else(|| "Unknown".to_string());
+
+        let existing_works = self.search_works(None, None, None).unwrap_or_default();
+
+        let mut games = Vec::new();
+        let mut new_games_count = 0;
+        let mut matched_games_count = 0;
+        let mut warning_count = 0;
+
+        for t in &selected_user.titles {
+            let external_id = t.id.trim().to_lowercase();
+            if external_id.is_empty() {
+                continue;
+            }
+            let title_name = t.name.clone().unwrap_or_else(|| external_id.clone());
+            let summary = t.summary.as_ref();
+            let playtime_seconds = summary.and_then(|s| s.playtime).unwrap_or(0);
+            let playtime_hours = (playtime_seconds as f64) / 3600.0;
+            let launches = summary.and_then(|s| s.launches);
+
+            let first_played_at = summary
+                .and_then(|s| s.first_played)
+                .and_then(|ts| if ts > 0 { chrono::DateTime::from_timestamp(ts, 0) } else { None });
+            let last_played_at = summary
+                .and_then(|s| s.last_played)
+                .and_then(|ts| if ts > 0 { chrono::DateTime::from_timestamp(ts, 0) } else { None });
+
+            let existing_record = self.get_game_activity("switch_nx", &selected_user_id, &external_id)?;
+
+            let mut is_time_decreased = false;
+            let mut is_duplicate_snapshot = false;
+            let mut warning = None;
+
+            let (
+                match_status,
+                matched_work_id,
+                matched_work_title,
+                existing_playtime_seconds,
+                existing_peak_seconds,
+            ) = if let Some(existing) = existing_record {
+                let work_title = self.get_entity(&existing.work_id).ok().flatten().map(|e| e.title);
+
+                if playtime_seconds < existing.playtime_seconds {
+                    is_time_decreased = true;
+                    warning = Some(format!(
+                        "游玩时长较上次减少 ({:.1}h -> {:.1}h)，历史峰值 {:.1}h",
+                        existing.playtime_hours(),
+                        playtime_hours,
+                        (existing.peak_seen_seconds as f64) / 3600.0
+                    ));
+                } else if playtime_seconds == existing.playtime_seconds
+                    && existing.last_import_sha256.as_deref() == Some(&file_sha256)
+                {
+                    is_duplicate_snapshot = true;
+                    warning = Some("与先前导入的快照完全一致".to_string());
+                } else if let (Some(exp_ts), Some(prev_exp)) = (export.export_timestamp, existing.source_exported_at) {
+                    if exp_ts < prev_exp {
+                        warning = Some("导出时间早于已保存记录的导出时间".to_string());
+                    }
+                }
+
+                matched_games_count += 1;
+                (
+                    SwitchGameMatchStatus::ExactMapped,
+                    Some(existing.work_id),
+                    work_title,
+                    Some(existing.playtime_seconds),
+                    Some(existing.peak_seen_seconds),
+                )
+            } else {
+                let norm_title = title_name.trim().to_lowercase();
+                let candidate = existing_works.iter().find(|w| {
+                    if w.title.trim().to_lowercase() == norm_title {
+                        return true;
+                    }
+                    if let Some(meta) = w.as_work_metadata() {
+                        if meta.aliases.iter().any(|a| a.trim().to_lowercase() == norm_title) {
+                            return true;
+                        }
+                    }
+                    false
+                });
+
+                if let Some(w) = candidate {
+                    matched_games_count += 1;
+                    (
+                        SwitchGameMatchStatus::SuggestedMatch,
+                        Some(w.id.clone()),
+                        Some(w.title.clone()),
+                        None,
+                        None,
+                    )
+                } else {
+                    new_games_count += 1;
+                    (
+                        SwitchGameMatchStatus::NewGame,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+            };
+
+            if warning.is_some() {
+                warning_count += 1;
+            }
+
+            games.push(SwitchGameCandidatePreview {
+                external_id,
+                title_name,
+                playtime_seconds,
+                playtime_hours,
+                launches,
+                first_played_at,
+                last_played_at,
+                match_status,
+                matched_work_id,
+                matched_work_title,
+                existing_playtime_seconds,
+                existing_peak_seconds,
+                is_time_decreased,
+                is_duplicate_snapshot,
+                warning,
+            });
+        }
+
+        let total_games = games.len();
+        Ok(SwitchImportPreview {
+            file_sha256,
+            export_timestamp: export.export_timestamp,
+            export_version: export.export_version,
+            profiles,
+            selected_user_id,
+            selected_user_name,
+            games,
+            total_games,
+            new_games_count,
+            matched_games_count,
+            warning_count,
+        })
+    }
+
+    pub fn commit_switch_import(
+        &self,
+        actor: &str,
+        decision: &SwitchImportDecision,
+    ) -> LoomaResult<SwitchImportOutcome> {
+        let outcome = self.repo.commit_switch_import(actor, decision)?;
+        self.emit_event(
+            actor,
+            DomainEvent::GameActivityImported {
+                count: outcome.imported_records,
+                provider: "switch_nx".to_string(),
+            },
+        );
+        Ok(outcome)
+    }
+
     pub fn list_experience_links(&self, experience_id: &str) -> LoomaResult<Vec<ExperienceLink>> {
         self.repo.list_experience_links(experience_id)
     }

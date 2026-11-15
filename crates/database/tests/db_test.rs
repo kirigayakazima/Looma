@@ -132,7 +132,7 @@ fn test_in_memory_db_and_services() {
     // 8. Backup & Doctor Service
     let manifest = db.generate_manifest().expect("generate manifest failed");
     assert_eq!(manifest.manifest_version, "2.0.0");
-    assert_eq!(manifest.schema_version, 4);
+    assert_eq!(manifest.schema_version, 5);
     assert!(manifest.assets_count >= 1);
 
     // Export backup to temp dir
