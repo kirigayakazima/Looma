@@ -608,6 +608,25 @@ pub struct WorkSummary {
     pub experiences: Vec<ExperienceEntry>,
 }
 
+/// Candidate artwork for a game work from online providers (Nlib Switch, Steam, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverCandidate {
+    pub provider: String,
+    pub title: String,
+    pub image_url: String,
+    pub aspect_ratio: String,
+    pub description: Option<String>,
+}
+
+/// Statistics and titles resulting from a batch auto cover matching operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoMatchResult {
+    pub matched_count: usize,
+    pub skipped_count: usize,
+    pub failed_count: usize,
+    pub matched_titles: Vec<String>,
+}
+
 /// Machine-readable invariant violation code
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

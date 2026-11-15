@@ -16,6 +16,7 @@ import {
   Gamepad2,
   AlertTriangle,
   Image as ImageIcon,
+  Sparkles,
 } from 'lucide-react';
 import {
   Asset,
@@ -26,6 +27,7 @@ import {
 } from '../types';
 import { ExperienceModal } from './ExperienceModal';
 import { CoverImage } from './CoverImage';
+import { OnlineCoverModal } from './OnlineCoverModal';
 
 interface WorkDetailDrawerProps {
   workId: string | null;
@@ -70,6 +72,7 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
 
   // Cover uploading state
   const [uploadingCover, setUploadingCover] = useState(false);
+  const [showOnlineCoverModal, setShowOnlineCoverModal] = useState(false);
 
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
     try {
@@ -378,17 +381,27 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
                       <div className="flex flex-wrap items-center gap-2">
                         <button
                           type="button"
+                          onClick={() => setShowOnlineCoverModal(true)}
+                          disabled={uploadingCover}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer shadow-sm"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>在线匹配官方封面</span>
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={handlePickCover}
                           disabled={uploadingCover}
-                          className="px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
+                          className="px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-white border border-neutral-800 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
                         >
-                          <ImageIcon className="w-3.5 h-3.5" />
+                          <ImageIcon className="w-3.5 h-3.5 text-neutral-400" />
                           <span>
                             {uploadingCover
                               ? '正在处理...'
                               : meta?.cover_asset_id
-                              ? '更换封面'
-                              : '选择本地图片为封面'}
+                              ? '更换本地图片'
+                              : '选择本地图片'}
                           </span>
                         </button>
 
@@ -406,7 +419,7 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
                         )}
                       </div>
                       <p className="text-[11px] text-neutral-500 leading-relaxed">
-                        支持 JPG, PNG, WEBP 等。选定封面将持久保存在媒体库，完整纳入 Vault 备份，并在游戏库网格自动生成缩略图展示。
+                        支持在线拉取 Switch/Steam 官方素材或上传本地图片。选定封面将持久保存在媒体库，完整纳入 Vault 备份并在游戏网格自动呈现。
                       </p>
                     </div>
                   </div>
@@ -965,6 +978,19 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Online Cover Search Modal */}
+      {showOnlineCoverModal && work && (
+        <OnlineCoverModal
+          workId={work.id}
+          workTitle={work.title}
+          onClose={() => setShowOnlineCoverModal(false)}
+          onCoverApplied={async () => {
+            await loadSummary();
+            if (onRefreshAll) await onRefreshAll();
+          }}
+        />
       )}
     </>
   );

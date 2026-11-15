@@ -424,4 +424,19 @@ export interface SwitchImportOutcome {
   skipped_records: number;
 }
 
+export interface CoverCandidate {
+  provider: string;
+  title: string;
+  image_url: string;
+  aspect_ratio: '1:1' | '2:3' | 'landscape';
+  description?: string | null;
+}
+
+export interface AutoMatchResult {
+  matched_count: number;
+  skipped_count: number;
+  failed_count: number;
+  matched_titles: string[];
+}
+
 

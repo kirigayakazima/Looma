@@ -708,27 +708,128 @@ impl LoomaCore {
         Ok(entity)
     }
 
-    pub fn set_work_cover_from_file(
+    /// Cleans raw candidate or rip folder names for accurate Steam store search.
+    pub fn clean_game_title_for_search(raw: &str) -> String {
+        let mut s = String::new();
+        let mut in_bracket = false;
+        for c in raw.chars() {
+            if c == '[' || c == '【' || c == '(' {
+                in_bracket = true;
+            } else if c == ']' || c == '】' || c == ')' {
+                in_bracket = false;
+            } else if !in_bracket {
+                s.push(c);
+            }
+        }
+
+        // Replace +, _, - with space first
+        s = s.replace('+', " ")
+             .replace('_', " ")
+             .replace('-', " ");
+
+        // Strip version tokens like v1.2, v0.0.9, v1.0 before dot replacement
+        let pre_words = s.split_whitespace().collect::<Vec<_>>();
+        let mut pre_kept = Vec::new();
+        for word in pre_words {
+            let lower = word.to_lowercase();
+            // If token starts with 'v' or 'ver' followed by a digit (e.g. v1.2, v0.0.9, v2)
+            if (lower.starts_with('v') || lower.starts_with("ver"))
+                && lower.chars().skip_while(|c| c.is_alphabetic()).next().map_or(false, |c| c.is_ascii_digit())
+            {
+                continue;
+            }
+            pre_kept.push(word);
+        }
+        s = pre_kept.join(" ");
+
+        // Now replace . with space for remaining words (e.g. Shapez.2 -> Shapez 2)
+        s = s.replace('.', " ");
+
+        // Case-insensitive phrase stripping for common edition prefixes/suffixes
+        let lower_initial = s.to_lowercase();
+        let phrases_to_remove = [
+            "game of the yorha edition",
+            "game of the year edition",
+            "game of the year",
+            "definitive edition",
+            "legendary edition",
+            "enhanced edition",
+            "special edition",
+            "digital deluxe",
+            "deluxe edition",
+            "gold edition",
+        ];
+        for phrase in phrases_to_remove {
+            if let Some(idx) = lower_initial.find(phrase) {
+                s.replace_range(idx..idx + phrase.len(), " ");
+                break;
+            }
+        }
+
+        let remove_keywords = [
+            "3dmgame", "chs", "cht", "green", "repack", "goldberg", "build",
+            "launcher", "edition", "yorha", "remastered", "test",
+            "demo", "version", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9",
+            "测试版", "客户端", "整合包", "单机"
+        ];
+
+        let words: Vec<&str> = s.split_whitespace().collect();
+        let mut kept_words = Vec::new();
+        for word in words {
+            let lower = word.to_lowercase();
+            if remove_keywords.iter().any(|&kw| lower == kw || lower.starts_with(kw)) {
+                continue;
+            }
+            kept_words.push(word);
+        }
+
+        // If the last word is a lone 0 leftover from version splitting (e.g. v1.0 -> v1 0)
+        if let Some(&"0") = kept_words.last() {
+            if kept_words.len() > 1 {
+                kept_words.pop();
+            }
+        }
+
+        let result = kept_words.join(" ").trim().to_string();
+        if result.is_empty() {
+            raw.trim().to_string()
+        } else {
+            result
+        }
+    }
+
+    /// Percent encodes a string for HTTP query params without external dependencies.
+    pub fn percent_encode(input: &str) -> String {
+        let mut encoded = String::new();
+        for b in input.bytes() {
+            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+                encoded.push(b as char);
+            } else if b == b' ' {
+                encoded.push('+');
+            } else {
+                encoded.push_str(&format!("%{:02X}", b));
+            }
+        }
+        encoded
+    }
+
+    pub fn set_work_cover_from_bytes(
         &self,
         actor: &str,
         work_id: &str,
-        file_path: &Path,
+        bytes: &[u8],
         user_selected: bool,
+        provider: Option<&str>,
     ) -> LoomaResult<Asset> {
         let _work = self.get_entity(work_id)?
             .ok_or_else(|| LoomaError::NotFound(format!("Work entity '{work_id}' not found")))?;
 
-        if !file_path.exists() {
-            return Err(LoomaError::NotFound(format!("File does not exist: {}", file_path.display())));
-        }
-        let file_meta = file_path.metadata()?;
-        if file_meta.len() > 50 * 1024 * 1024 {
+        if bytes.len() > 50 * 1024 * 1024 {
             return Err(LoomaError::Validation("Cover image exceeds 50MB safety limit".to_string()));
         }
-        let bytes = std::fs::read(file_path)?;
 
-        let reader = image::ImageReader::open(file_path)
-            .map_err(|e| LoomaError::Validation(format!("Cannot open image: {e}")))?
+        let cursor = std::io::Cursor::new(bytes);
+        let reader = image::ImageReader::new(cursor)
             .with_guessed_format()
             .map_err(|e| LoomaError::Validation(format!("Unsupported image format: {e}")))?;
 
@@ -744,7 +845,7 @@ impl LoomaCore {
 
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(&bytes);
+        hasher.update(bytes);
         let hash = format!("{:x}", hasher.finalize());
 
         let (ext, mime_type) = match format {
@@ -774,7 +875,7 @@ impl LoomaCore {
         let file_name = format!("{hash}.{ext}");
         let dest_path = covers_dir.join(&file_name);
         if !dest_path.exists() {
-            std::fs::write(&dest_path, &bytes)?;
+            std::fs::write(&dest_path, bytes)?;
         }
 
         let rel_path = format!(".looma/media/covers/{file_name}");
@@ -791,6 +892,7 @@ impl LoomaCore {
             metadata: json!({
                 "role": "work_cover",
                 "user_selected": user_selected,
+                "provider": provider.unwrap_or("unknown"),
                 "aspect_ratio": aspect_ratio,
                 "width": width,
                 "height": height,
@@ -805,6 +907,293 @@ impl LoomaCore {
         self.update_work_cover_asset(actor, work_id, Some(asset_id))?;
 
         Ok(asset)
+    }
+
+    pub fn set_work_cover_from_file(
+        &self,
+        actor: &str,
+        work_id: &str,
+        file_path: &Path,
+        user_selected: bool,
+    ) -> LoomaResult<Asset> {
+        if !file_path.exists() {
+            return Err(LoomaError::NotFound(format!("File does not exist: {}", file_path.display())));
+        }
+        let file_meta = file_path.metadata()?;
+        if file_meta.len() > 50 * 1024 * 1024 {
+            return Err(LoomaError::Validation("Cover image exceeds 50MB safety limit".to_string()));
+        }
+        let bytes = std::fs::read(file_path)?;
+        self.set_work_cover_from_bytes(actor, work_id, &bytes, user_selected, Some("local_file"))
+    }
+
+    pub fn download_and_set_work_cover(
+        &self,
+        actor: &str,
+        work_id: &str,
+        url: &str,
+        user_selected: bool,
+    ) -> LoomaResult<Asset> {
+        let resp = ureq::get(url)
+            .timeout(std::time::Duration::from_secs(12))
+            .set("User-Agent", "Looma/0.6 (+https://github.com/kirigayakazima/Looma)")
+            .call()
+            .map_err(|e| LoomaError::Validation(format!("Failed to fetch cover from URL: {e}")))?;
+
+        if resp.status() != 200 {
+            return Err(LoomaError::Validation(format!("Cover image URL returned status {}", resp.status())));
+        }
+
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        resp.into_reader()
+            .take(50 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+
+        if bytes.len() > 50 * 1024 * 1024 {
+            return Err(LoomaError::Validation("Downloaded cover image exceeds 50MB safety limit".to_string()));
+        }
+
+        let provider = if url.contains("nlib.cc") {
+            "nlib"
+        } else if url.contains("steam") {
+            "steam"
+        } else {
+            "online"
+        };
+
+        self.set_work_cover_from_bytes(actor, work_id, &bytes, user_selected, Some(provider))
+    }
+
+    pub fn fetch_cover_candidates(
+        &self,
+        work_id: &str,
+        search_term: Option<&str>,
+    ) -> LoomaResult<Vec<CoverCandidate>> {
+        let summary = self.get_work_summary(work_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work '{work_id}' not found")))?;
+        let work = &summary.entity;
+        let mut candidates = Vec::new();
+
+        let explicit_term = search_term.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        // 1. Check if term is a 16-hex Switch Title ID or work has switch activities
+        let mut tids = Vec::new();
+        if let Some(t) = explicit_term {
+            if t.len() == 16 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+                tids.push(t.to_uppercase());
+            }
+        }
+        let activities = self.list_game_activities_for_work(work_id).unwrap_or_default();
+        for act in activities {
+            if act.provider == "switch_nx" {
+                let upper = act.external_id.to_uppercase();
+                if upper.len() == 16 && !tids.contains(&upper) {
+                    tids.push(upper);
+                }
+            }
+        }
+
+        for tid in tids {
+            let nlib_meta_url = format!("https://api.nlib.cc/nx/{tid}");
+            let mut game_name = None;
+            if let Ok(resp) = ureq::get(&nlib_meta_url).timeout(std::time::Duration::from_secs(5)).call() {
+                if resp.status() == 200 {
+                    if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
+                        if let Some(n) = val.get("name").and_then(|v| v.as_str()) {
+                            game_name = Some(n.to_string());
+                        }
+                    }
+                }
+            }
+            let label_prefix = game_name.unwrap_or_else(|| work.title.clone());
+            candidates.push(CoverCandidate {
+                provider: "nlib".to_string(),
+                title: format!("{label_prefix} (Switch 官方方形图标)"),
+                image_url: format!("https://api.nlib.cc/nx/{tid}/icon"),
+                aspect_ratio: "1:1".to_string(),
+                description: Some(format!("512×512 高清图标 | Title ID: {tid}")),
+            });
+            candidates.push(CoverCandidate {
+                provider: "nlib".to_string(),
+                title: format!("{label_prefix} (Switch 官方横版横幅)"),
+                image_url: format!("https://api.nlib.cc/nx/{tid}/banner/720p"),
+                aspect_ratio: "landscape".to_string(),
+                description: Some(format!("720p 横幅 | Title ID: {tid}")),
+            });
+        }
+
+        // 2. Check Steam AppID from term or external references
+        let mut appids = Vec::new();
+        if let Some(t) = explicit_term {
+            if t.chars().all(|c| c.is_ascii_digit()) && t.len() >= 3 && t.len() <= 9 {
+                appids.push(t.to_string());
+            }
+        }
+        for r in &summary.external_references {
+            if r.provider == "steam" || r.url.contains("store.steampowered.com/app/") {
+                if let Some(part) = r.url.split("/app/").nth(1) {
+                    if let Some(id_str) = part.split('/').next() {
+                        if id_str.chars().all(|c| c.is_ascii_digit()) && !appids.contains(&id_str.to_string()) {
+                            appids.push(id_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        for appid in appids {
+            candidates.push(CoverCandidate {
+                provider: "steam".to_string(),
+                title: format!("{} (Steam 官方竖版海报)", work.title),
+                image_url: format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg"),
+                aspect_ratio: "2:3".to_string(),
+                description: Some(format!("600×900 官方海报 | AppID: {appid}")),
+            });
+            candidates.push(CoverCandidate {
+                provider: "steam".to_string(),
+                title: format!("{} (Steam 官方横幅)", work.title),
+                image_url: format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{appid}/header.jpg"),
+                aspect_ratio: "landscape".to_string(),
+                description: Some(format!("Steam Header | AppID: {appid}")),
+            });
+        }
+
+        // 3. Online keyword search on Steam
+        let query_text = explicit_term
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Self::clean_game_title_for_search(&work.title));
+
+        if query_text.len() >= 2 && !query_text.chars().all(|c| c.is_ascii_hexdigit()) {
+            let encoded = Self::percent_encode(&query_text);
+            let search_url = format!("https://store.steampowered.com/api/storesearch/?term={encoded}&cc=US");
+            if let Ok(resp) = ureq::get(&search_url).timeout(std::time::Duration::from_secs(6)).call() {
+                if resp.status() == 200 {
+                    if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
+                        if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
+                            for item in items.iter().take(6) {
+                                if let (Some(id), Some(name)) = (
+                                    item.get("id").and_then(|v| v.as_u64()),
+                                    item.get("name").and_then(|v| v.as_str()),
+                                ) {
+                                    let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg");
+                                    if !candidates.iter().any(|c| c.image_url == capsule_url) {
+                                        candidates.push(CoverCandidate {
+                                            provider: "steam".to_string(),
+                                            title: name.to_string(),
+                                            image_url: capsule_url,
+                                            aspect_ratio: "2:3".to_string(),
+                                            description: Some(format!("Steam 600×900 海报 | AppID: {id}")),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(candidates)
+    }
+
+    pub fn batch_auto_match_game_covers(
+        &self,
+        actor: &str,
+    ) -> LoomaResult<AutoMatchResult> {
+        let all_works = self.list_works(Some("game"), None)?;
+        let mut matched_count = 0;
+        let mut skipped_count = 0;
+        let mut failed_count = 0;
+        let mut matched_titles = Vec::new();
+
+        for work in all_works {
+            let meta = work.as_work_metadata();
+            if let Some(m) = &meta {
+                if m.cover_asset_id.is_some() {
+                    skipped_count += 1;
+                    continue;
+                }
+            }
+
+            // 1. Try Switch Title ID
+            let activities = self.list_game_activities_for_work(&work.id).unwrap_or_default();
+            let switch_tid = activities.iter().find_map(|act| {
+                if act.provider == "switch_nx" && act.external_id.len() == 16 {
+                    Some(act.external_id.to_uppercase())
+                } else {
+                    None
+                }
+            });
+
+            if let Some(tid) = switch_tid {
+                let icon_url = format!("https://api.nlib.cc/nx/{tid}/icon");
+                if self.download_and_set_work_cover(actor, &work.id, &icon_url, false).is_ok() {
+                    matched_count += 1;
+                    matched_titles.push(work.title.clone());
+                    continue;
+                }
+            }
+
+            // 2. Try Steam AppID from External Reference
+            let summary = self.get_work_summary(&work.id).ok().flatten();
+            let steam_appid = summary.as_ref().and_then(|s| {
+                s.external_references.iter().find_map(|r| {
+                    if r.provider == "steam" {
+                        r.url.split("/app/").nth(1)?.split('/').next().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            if let Some(appid) = steam_appid {
+                let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg");
+                if self.download_and_set_work_cover(actor, &work.id, &capsule_url, false).is_ok() {
+                    matched_count += 1;
+                    matched_titles.push(work.title.clone());
+                    continue;
+                }
+            }
+
+            // 3. Try Auto Search on Steam by cleaned title
+            let cleaned = Self::clean_game_title_for_search(&work.title);
+            if cleaned.len() >= 2 {
+                let encoded = Self::percent_encode(&cleaned);
+                let search_url = format!("https://store.steampowered.com/api/storesearch/?term={encoded}&cc=US");
+                let mut found = false;
+                if let Ok(resp) = ureq::get(&search_url).timeout(std::time::Duration::from_secs(5)).call() {
+                    if resp.status() == 200 {
+                        if let Ok(val) = serde_json::from_reader::<_, serde_json::Value>(resp.into_reader()) {
+                            if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
+                                if let Some(first) = items.first() {
+                                    if let Some(app_id) = first.get("id").and_then(|v| v.as_u64()) {
+                                        let capsule_url = format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{app_id}/library_600x900.jpg");
+                                        if self.download_and_set_work_cover(actor, &work.id, &capsule_url, false).is_ok() {
+                                            matched_count += 1;
+                                            matched_titles.push(work.title.clone());
+                                            found = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if found {
+                    continue;
+                }
+            }
+
+            failed_count += 1;
+        }
+
+        Ok(AutoMatchResult {
+            matched_count,
+            skipped_count,
+            failed_count,
+            matched_titles,
+        })
     }
 
     pub fn remove_work_cover(

@@ -648,6 +648,35 @@ fn remove_work_cover(
 }
 
 #[tauri::command]
+fn download_and_set_work_cover(
+    work_id: String,
+    image_url: String,
+    user_selected: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<Asset, String> {
+    state.core.download_and_set_work_cover("desktop", &work_id, &image_url, user_selected.unwrap_or(true))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn fetch_cover_candidates(
+    work_id: String,
+    search_term: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<CoverCandidate>, String> {
+    state.core.fetch_cover_candidates(&work_id, search_term.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn batch_auto_match_game_covers(
+    state: State<'_, AppState>,
+) -> Result<AutoMatchResult, String> {
+    state.core.batch_auto_match_game_covers("desktop")
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn detect_game_candidates(
     root_path: String,
     state: State<'_, AppState>,
@@ -874,7 +903,10 @@ pub fn run() {
             list_game_activities,
             pick_image_file,
             set_work_cover_from_file,
-            remove_work_cover
+            remove_work_cover,
+            download_and_set_work_cover,
+            fetch_cover_candidates,
+            batch_auto_match_game_covers
         ])
         .run(tauri::generate_context!())
     {

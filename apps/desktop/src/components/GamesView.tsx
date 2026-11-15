@@ -24,6 +24,7 @@ import {
   Asset,
   RecordStatus,
   GameCandidate,
+  AutoMatchResult,
 } from '../types';
 import { WorkDetailDrawer } from './WorkDetailDrawer';
 import { SwitchImportModal } from './SwitchImportModal';
@@ -69,6 +70,10 @@ export const GamesView: React.FC<GamesViewProps> = ({
   const [scanningCandidates, setScanningCandidates] = useState(false);
   const [candidates, setCandidates] = useState<GameCandidate[]>([]);
   const [candidateError, setCandidateError] = useState<string | null>(null);
+
+  // Auto Match State
+  const [autoMatching, setAutoMatching] = useState(false);
+  const [autoMatchMsg, setAutoMatchMsg] = useState<string | null>(null);
 
   // Safe IPC invoke
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
@@ -217,6 +222,26 @@ export const GamesView: React.FC<GamesViewProps> = ({
       if (onRefreshAll) onRefreshAll();
     } finally {
       setCreating(false);
+    }
+  };
+
+  // Batch auto match covers
+  const handleBatchAutoMatch = async () => {
+    setAutoMatching(true);
+    setAutoMatchMsg(null);
+    try {
+      const res = await safeInvoke<AutoMatchResult>('batch_auto_match_game_covers');
+      if (res) {
+        setAutoMatchMsg(
+          `一键匹配完成！成功为 ${res.matched_count} 款游戏下载并持久化官方封面 (跳过已有 ${res.skipped_count} 款，未匹配 ${res.failed_count} 款)`
+        );
+        await loadGames();
+        if (onRefreshAll) await onRefreshAll();
+      }
+    } catch (err: any) {
+      setAutoMatchMsg(`自动匹配失败: ${err?.message || String(err)}`);
+    } finally {
+      setAutoMatching(false);
     }
   };
 
@@ -380,6 +405,16 @@ export const GamesView: React.FC<GamesViewProps> = ({
               </button>
 
               <button
+                onClick={handleBatchAutoMatch}
+                disabled={autoMatching}
+                className="px-3.5 py-2 rounded-lg bg-emerald-950/40 hover:bg-emerald-900/40 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer shadow-sm disabled:opacity-50"
+                title="自动为尚未设置封面的 Switch 与 Steam 游戏拉取官方海报并持久化"
+              >
+                <Sparkles className={`w-4 h-4 text-emerald-400 ${autoMatching ? 'animate-spin' : ''}`} />
+                <span>{autoMatching ? '正在匹配封面...' : '一键匹配在线封面'}</span>
+              </button>
+
+              <button
                 onClick={() => {
                   setShowCandidateModal(true);
                   if (candidates.length === 0) {
@@ -512,6 +547,22 @@ export const GamesView: React.FC<GamesViewProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Auto Match Notification Banner */}
+        {autoMatchMsg && (
+          <div className="mx-6 mt-4 p-3 rounded-xl bg-emerald-950/40 border border-emerald-800 text-xs text-emerald-300 flex items-center justify-between animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>{autoMatchMsg}</span>
+            </div>
+            <button
+              onClick={() => setAutoMatchMsg(null)}
+              className="text-neutral-500 hover:text-neutral-300 ml-2 p-0.5 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {/* Game Cards Grid */}
         <div className="flex-1 overflow-y-auto p-6">

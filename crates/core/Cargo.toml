@@ -17,3 +17,4 @@ sha2.workspace = true
 hex.workspace = true
 base64.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+ureq = { version = "2.10", features = ["tls"] }
