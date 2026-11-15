@@ -32,6 +32,14 @@ interface EntitiesViewProps {
   onRefresh: () => Promise<void> | void;
 }
 
+const SYSTEM_RESERVED_KEYS = ['work', 'domain', 'status', 'work_type', 'progress', 'aliases', 'cover_asset_id'];
+
+interface FormPropItem {
+  key: string;
+  value: string;
+  propType: 'string' | 'number' | 'boolean';
+}
+
 export const EntitiesView: React.FC<EntitiesViewProps> = ({
   entities,
   assets,
@@ -49,7 +57,7 @@ export const EntitiesView: React.FC<EntitiesViewProps> = ({
   const [formTitle, setFormTitle] = useState('');
   const [formType, setFormType] = useState('project');
   const [formDesc, setFormDesc] = useState('');
-  const [formProps, setFormProps] = useState<{ key: string; value: string }[]>([]);
+  const [formProps, setFormProps] = useState<FormPropItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   // Detail modal state
@@ -135,17 +143,26 @@ export const EntitiesView: React.FC<EntitiesViewProps> = ({
     setFormType(entity.entity_type);
     setFormDesc(entity.description || '');
 
-    const propsList = Object.entries(entity.properties || {}).map(([k, v]) => ({
-      key: k,
-      value: typeof v === 'object' ? JSON.stringify(v) : String(v),
-    }));
+    // Isolate system reserved keys so they are not corrupted by generic text inputs
+    const propsList: FormPropItem[] = Object.entries(entity.properties || {})
+      .filter(([k]) => !SYSTEM_RESERVED_KEYS.includes(k))
+      .map(([k, v]) => {
+        let propType: 'string' | 'number' | 'boolean' = 'string';
+        if (typeof v === 'number') propType = 'number';
+        else if (typeof v === 'boolean') propType = 'boolean';
+        return {
+          key: k,
+          value: typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v),
+          propType,
+        };
+      });
     setFormProps(propsList);
     setShowEditModal(true);
   };
 
   // Add a dynamic property row
   const handleAddPropRow = () => {
-    setFormProps([...formProps, { key: '', value: '' }]);
+    setFormProps([...formProps, { key: '', value: '', propType: 'string' }]);
   };
 
   // Remove a dynamic property row
@@ -154,9 +171,9 @@ export const EntitiesView: React.FC<EntitiesViewProps> = ({
   };
 
   // Update dynamic property row
-  const handleUpdatePropRow = (index: number, field: 'key' | 'value', val: string) => {
+  const handleUpdatePropRow = (index: number, field: 'key' | 'value' | 'propType', val: string) => {
     const updated = [...formProps];
-    updated[index][field] = val;
+    (updated[index] as any)[field] = val;
     setFormProps(updated);
   };
 
@@ -168,9 +185,28 @@ export const EntitiesView: React.FC<EntitiesViewProps> = ({
 
     try {
       const propertiesObj: Record<string, unknown> = {};
-      formProps.forEach(({ key, value }) => {
+
+      // If editing an existing entity, faithfully preserve all system reserved keys
+      if (editingEntityId) {
+        const existing = entities.find((ent) => ent.id === editingEntityId);
+        if (existing?.properties) {
+          for (const k of SYSTEM_RESERVED_KEYS) {
+            if (k in existing.properties) {
+              propertiesObj[k] = existing.properties[k];
+            }
+          }
+        }
+      }
+
+      formProps.forEach(({ key, value, propType }) => {
         const trimmedKey = key.trim();
-        if (trimmedKey) {
+        if (!trimmedKey || SYSTEM_RESERVED_KEYS.includes(trimmedKey)) return;
+        if (propType === 'number') {
+          const num = Number(value.trim());
+          propertiesObj[trimmedKey] = isNaN(num) ? value.trim() : num;
+        } else if (propType === 'boolean') {
+          propertiesObj[trimmedKey] = value.trim().toLowerCase() === 'true';
+        } else {
           propertiesObj[trimmedKey] = value.trim();
         }
       });
@@ -497,6 +533,12 @@ export const EntitiesView: React.FC<EntitiesViewProps> = ({
               </button>
             </div>
 
+            {editingEntityId && Boolean(entities.find((e) => e.id === editingEntityId)?.properties?.work) && (
+              <div className="p-3 rounded-lg bg-indigo-950/40 border border-indigo-800/60 text-indigo-300 text-[11px] leading-relaxed">
+                🛡️ <strong>作品保护模式</strong>：本实体绑定了底层作品元数据（进度、别名、封面等）。通用实体编辑器仅管理基础与自定义属性，系统会自动保护并原样保留所有作品特有数据。
+              </div>
+            )}
+
             <form onSubmit={handleSaveEntity} className="space-y-4">
               {/* Title & Type */}
               <div className="space-y-3">
@@ -593,9 +635,19 @@ export const EntitiesView: React.FC<EntitiesViewProps> = ({
                           onChange={(e) => handleUpdatePropRow(idx, 'key', e.target.value)}
                           className="w-1/3 bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1 text-xs text-neutral-200 font-mono focus:outline-none focus:border-neutral-700"
                         />
+                        <select
+                          value={p.propType || 'string'}
+                          onChange={(e) => handleUpdatePropRow(idx, 'propType', e.target.value as any)}
+                          className="bg-neutral-950 border border-neutral-800 rounded px-1.5 py-1 text-[11px] text-neutral-400 font-mono focus:outline-none focus:border-neutral-700 cursor-pointer"
+                          title="属性类型"
+                        >
+                          <option value="string">文本</option>
+                          <option value="number">数字</option>
+                          <option value="boolean">布尔</option>
+                        </select>
                         <input
                           type="text"
-                          placeholder={t.entities.propValue}
+                          placeholder={p.propType === 'boolean' ? 'true / false' : t.entities.propValue}
                           value={p.value}
                           onChange={(e) => handleUpdatePropRow(idx, 'value', e.target.value)}
                           className="flex-1 bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1 text-xs text-neutral-200 font-mono focus:outline-none focus:border-neutral-700"
@@ -690,14 +742,24 @@ export const EntitiesView: React.FC<EntitiesViewProps> = ({
                   {t.entities.propertiesLabel}
                 </h5>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
-                  {Object.entries(activeEntity.properties).map(([k, v]) => (
-                    <div key={k} className="bg-neutral-900/80 p-2 rounded-lg border border-neutral-850">
-                      <span className="text-neutral-500 text-[10px] block font-mono uppercase">{k}</span>
-                      <span className="text-neutral-200 font-medium font-mono text-[11px] break-all">
-                        {String(v)}
-                      </span>
-                    </div>
-                  ))}
+                  {Object.entries(activeEntity.properties).map(([k, v]) => {
+                    const isWorkKey = k === 'work';
+                    const isObject = typeof v === 'object' && v !== null;
+                    return (
+                      <div key={k} className="bg-neutral-900/80 p-2 rounded-lg border border-neutral-850">
+                        <span className="text-neutral-500 text-[10px] block font-mono uppercase">{k}</span>
+                        <span className="text-neutral-200 font-medium font-mono text-[11px] break-all">
+                          {isWorkKey ? (
+                            <span className="text-indigo-400 font-medium">作品元数据 (已保护)</span>
+                          ) : isObject ? (
+                            <span className="text-neutral-400">{JSON.stringify(v)}</span>
+                          ) : (
+                            String(v)
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}

@@ -287,6 +287,18 @@ fn apply_smart_suggestion(
 }
 
 #[tauri::command]
+fn apply_batch_suggestions(
+    state: State<'_, AppState>,
+    suggestions: Vec<looma_intelligence::Suggestion>,
+) -> Result<looma_intelligence::BatchApplyResult, String> {
+    Ok(looma_intelligence::IntelligenceEngine::apply_batch_suggestions(
+        &state.core,
+        "desktop",
+        &suggestions,
+    ))
+}
+
+#[tauri::command]
 fn list_recent_audits(
     limit: Option<usize>,
     state: State<'_, AppState>,
@@ -682,6 +694,7 @@ pub fn run() {
             doctor_cleanup_missing,
             get_smart_insights,
             apply_smart_suggestion,
+            apply_batch_suggestions,
             list_recent_audits,
             list_external_references,
             create_external_reference,

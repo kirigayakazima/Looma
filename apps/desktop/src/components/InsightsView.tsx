@@ -9,7 +9,6 @@ import {
   RefreshCw,
   FolderPlus,
   CheckCheck,
-  TrendingUp,
 } from 'lucide-react';
 import { SmartInsightsReport, Suggestion, SuggestionType } from '../types';
 import { useI18n } from '../i18n';
@@ -53,6 +52,11 @@ export const InsightsView: React.FC<InsightsViewProps> = ({ onRefreshAll }) => {
   }, [loadInsights]);
 
   const handleApply = async (s: Suggestion) => {
+    if (s.suggestion_type === 'tag') {
+      setFeedbackMsg('v0.5 暂不支持标签规则自动打标');
+      setTimeout(() => setFeedbackMsg(null), 3000);
+      return;
+    }
     setApplyingId(s.id);
     try {
       const ok = await safeInvoke<boolean>('apply_smart_suggestion', { suggestion: s });
@@ -61,6 +65,9 @@ export const InsightsView: React.FC<InsightsViewProps> = ({ onRefreshAll }) => {
         setTimeout(() => setFeedbackMsg(null), 3000);
         await loadInsights();
         if (onRefreshAll) await onRefreshAll();
+      } else {
+        setFeedbackMsg('应用建议失败，请查看日志');
+        setTimeout(() => setFeedbackMsg(null), 4000);
       }
     } finally {
       setApplyingId(null);
@@ -76,12 +83,24 @@ export const InsightsView: React.FC<InsightsViewProps> = ({ onRefreshAll }) => {
         ...report.cluster_suggestions,
       ].filter((s) => s.confidence >= 0.85);
 
-      for (const s of highConfidence) {
-        await safeInvoke<boolean>('apply_smart_suggestion', { suggestion: s });
+      if (highConfidence.length === 0) {
+        setFeedbackMsg('没有符合高置信度（>= 85%）的可执行建议');
+        setTimeout(() => setFeedbackMsg(null), 3000);
+        return;
       }
 
-      setFeedbackMsg(t.insights.autoApplySuccess);
-      setTimeout(() => setFeedbackMsg(null), 3000);
+      const res = await safeInvoke<BatchApplyResult>('apply_batch_suggestions', {
+        suggestions: highConfidence,
+      });
+
+      if (res) {
+        setFeedbackMsg(
+          `批量应用完成：成功 ${res.success_count} 项，失败 ${res.failure_count} 项，跳过 ${res.skipped_count} 项`
+        );
+      } else {
+        setFeedbackMsg('批量应用执行失败');
+      }
+      setTimeout(() => setFeedbackMsg(null), 5000);
       await loadInsights();
       if (onRefreshAll) await onRefreshAll();
     } finally {
@@ -282,9 +301,16 @@ export const InsightsView: React.FC<InsightsViewProps> = ({ onRefreshAll }) => {
                       </span>
                     </div>
 
-                    <div className="flex items-center space-x-1 text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                      <TrendingUp className="w-3 h-3" />
-                      <span>{Math.round(s.confidence * 100)}%</span>
+                    <div className="flex items-center space-x-1.5 text-[10px] font-mono px-2 py-0.5 rounded border border-neutral-700/60 bg-neutral-850">
+                      <span className={
+                        s.confidence >= 0.9 ? 'text-emerald-400 font-semibold' :
+                        s.confidence >= 0.8 ? 'text-indigo-400 font-semibold' :
+                        'text-amber-400'
+                      }>
+                        {s.confidence >= 0.9 ? '同名强匹配' : s.confidence >= 0.8 ? '目录强关联' : '启发式推荐'}
+                      </span>
+                      <span className="text-neutral-500">|</span>
+                      <span className="text-neutral-400">{Math.round(s.confidence * 100)}%</span>
                     </div>
                   </div>
 

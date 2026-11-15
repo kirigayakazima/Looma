@@ -7,10 +7,10 @@ use uuid::Uuid;
 
 use looma_core::{
     Asset, AssetKind, Collection,
-    EntityFilter, LoomaCore, LoomaResult, Relation,
+    EntityFilter, LoomaCore, LoomaError, LoomaResult, Relation,
 };
 
-use crate::models::{SmartInsightsReport, Suggestion, SuggestionType};
+use crate::models::{BatchApplyResult, SmartInsightsReport, Suggestion, SuggestionType};
 
 pub struct IntelligenceEngine;
 
@@ -375,18 +375,55 @@ impl IntelligenceEngine {
 
                     for (_idx, aid_val) in asset_ids.iter().enumerate() {
                         if let Some(aid) = aid_val.as_str() {
-                            let _ = core.add_item_to_collection(actor, &col.id, aid, "asset");
+                            core.add_item_to_collection(actor, &col.id, aid, "asset")?;
                         }
                     }
                     return Ok(true);
                 }
             }
             SuggestionType::Tag => {
-                // Future: store suggested tags into asset metadata
-                return Ok(true);
+                return Err(LoomaError::Validation(
+                    "Tag 建议自动写入功能尚未开放，无法应用".to_string(),
+                ));
             }
         }
 
         Ok(false)
+    }
+
+    /// Atomically and faithfully apply a batch of suggestions, returning full itemized success,
+    /// failure and skipped counts with explicit error diagnostics.
+    pub fn apply_batch_suggestions(
+        core: &LoomaCore,
+        actor: &str,
+        suggestions: &[Suggestion],
+    ) -> BatchApplyResult {
+        let mut result = BatchApplyResult {
+            total_attempted: suggestions.len(),
+            ..Default::default()
+        };
+
+        for s in suggestions {
+            if s.suggestion_type == SuggestionType::Tag {
+                result.skipped_count += 1;
+                result.errors.push(format!("跳过建议「{}」: 标签自动写入功能尚未开放", s.title));
+                continue;
+            }
+
+            match Self::apply_suggestion(core, actor, s) {
+                Ok(true) => {
+                    result.success_count += 1;
+                }
+                Ok(false) => {
+                    result.skipped_count += 1;
+                }
+                Err(e) => {
+                    result.failure_count += 1;
+                    result.errors.push(format!("应用建议「{}」失败: {e}", s.title));
+                }
+            }
+        }
+
+        result
     }
 }

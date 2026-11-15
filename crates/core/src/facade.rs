@@ -335,19 +335,70 @@ impl LoomaCore {
         if entity.title.trim().is_empty() {
             return Err(LoomaError::Validation("Entity title cannot be empty".to_string()));
         }
-        self.repo.update_entity(entity)?;
+
+        // Fetch existing entity to verify existence and check for Work domain protection
+        let existing = self.repo.get_entity_by_id(&entity.id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Entity not found: {}", entity.id)))?;
+
+        let is_work = existing.as_work_metadata().is_some()
+            || existing.entity_type == "work"
+            || existing.properties.get("domain").and_then(|v| v.as_str()) == Some("work");
+
+        let mut final_entity = entity.clone();
+
+        if is_work {
+            if let Some(work_val) = entity.properties.get("work") {
+                // Must be a valid JSON Object, not a scalar string or number
+                if !work_val.is_object() {
+                    return Err(LoomaError::Validation(
+                        "Invalid properties.work: expected a JSON object representing WorkMetadata, found non-object scalar".to_string()
+                    ));
+                }
+                // Must deserialize to WorkMetadata
+                if let Err(e) = serde_json::from_value::<WorkMetadata>(work_val.clone()) {
+                    return Err(LoomaError::Validation(format!(
+                        "Invalid properties.work payload: {e}"
+                    )));
+                }
+            } else {
+                // Caller did not provide "work", e.g. generic entity editor modifying title/description/custom fields.
+                // PRESERVE the existing WorkMetadata and work domain attributes!
+                if let Some(existing_work) = existing.properties.get("work") {
+                    if let Some(obj) = final_entity.properties.as_object_mut() {
+                        obj.insert("work".to_string(), existing_work.clone());
+                        if !obj.contains_key("domain") {
+                            obj.insert("domain".to_string(), serde_json::json!("work"));
+                        }
+                        if !obj.contains_key("status") {
+                            if let Some(st) = existing.properties.get("status") {
+                                obj.insert("status".to_string(), st.clone());
+                            }
+                        }
+                        if !obj.contains_key("work_type") {
+                            if let Some(wt) = existing.properties.get("work_type") {
+                                obj.insert("work_type".to_string(), wt.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        final_entity.updated_at = Utc::now();
+
+        self.repo.update_entity(&final_entity)?;
         self.record_audit(
             actor,
             "entity.update",
             "entity",
-            &entity.id,
+            &final_entity.id,
             "success",
-            json!({ "title": entity.title, "type": entity.entity_type }),
+            json!({ "title": final_entity.title, "type": final_entity.entity_type }),
         )?;
         self.emit_event(
             actor,
             DomainEvent::EntityUpdated {
-                id: entity.id.clone(),
+                id: final_entity.id.clone(),
             },
         );
         Ok(())

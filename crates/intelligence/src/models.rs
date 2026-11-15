@@ -31,3 +31,12 @@ pub struct SmartInsightsReport {
     pub tag_suggestions: Vec<Suggestion>,
     pub cluster_suggestions: Vec<Suggestion>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct BatchApplyResult {
+    pub total_attempted: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+    pub skipped_count: usize,
+    pub errors: Vec<String>,
+}

@@ -199,6 +199,14 @@ export interface SmartInsightsReport {
   cluster_suggestions: Suggestion[];
 }
 
+export interface BatchApplyResult {
+  total_attempted: number;
+  success_count: number;
+  failure_count: number;
+  skipped_count: number;
+  errors: string[];
+}
+
 export interface ExternalReference {
   id: string;
   entity_id: string | null;
