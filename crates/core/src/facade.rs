@@ -24,6 +24,7 @@ pub trait VaultRepository:
     + ExperienceService
     + SourceRootService
     + SearchService
+    + GameActivityService
     + Send
     + Sync
 {
@@ -43,6 +44,7 @@ impl<T> VaultRepository for T where
         + ExperienceService
         + SourceRootService
         + SearchService
+        + GameActivityService
         + Send
         + Sync
 {
@@ -2433,6 +2435,23 @@ impl LoomaCore {
             self.emit_event(actor, DomainEvent::ExperienceArchived { id: id.to_string() });
         }
         Ok(archived)
+    }
+
+    // --- Game Activity / Playtime Records ---
+    pub fn list_game_activities_for_work(&self, work_id: &str) -> LoomaResult<Vec<GameActivityRecord>> {
+        self.repo.list_game_activities_for_work(work_id)
+    }
+
+    pub fn get_game_activity(&self, provider: &str, source_key: &str, external_id: &str) -> LoomaResult<Option<GameActivityRecord>> {
+        self.repo.get_game_activity(provider, source_key, external_id)
+    }
+
+    pub fn upsert_game_activity(&self, record: &GameActivityRecord) -> LoomaResult<()> {
+        self.repo.upsert_game_activity(record)
+    }
+
+    pub fn delete_game_activity(&self, id: &str) -> LoomaResult<bool> {
+        self.repo.delete_game_activity(id)
     }
 
     pub fn list_experience_links(&self, experience_id: &str) -> LoomaResult<Vec<ExperienceLink>> {

@@ -2054,6 +2054,8 @@ impl BackupService for LoomaDb {
             }
         }
 
+        let game_activities = self.list_all_game_activities()?;
+
         let dump = VaultExportDump {
             manifest: manifest.clone(),
             assets,
@@ -2067,6 +2069,7 @@ impl BackupService for LoomaDb {
             source_roots,
             asset_lifecycles,
             asset_suppressions,
+            game_activities,
         };
         let dump_bytes = serde_json::to_vec_pretty(&dump)
             .map_err(LoomaError::Serialization)?;
@@ -2149,9 +2152,9 @@ impl BackupService for LoomaDb {
         let manifest: VaultManifest = serde_json::from_str(&manifest_str)
             .map_err(LoomaError::Serialization)?;
 
-        if manifest.schema_version > 4 {
+        if manifest.schema_version > 5 {
             return Err(LoomaError::Validation(format!(
-                "Unsupported backup schema version: {} (maximum supported schema version is 4)",
+                "Unsupported backup schema version: {} (maximum supported schema version is 5)",
                 manifest.schema_version
             )));
         }
@@ -2484,6 +2487,47 @@ impl BackupService for LoomaDb {
                 params![sup.id, sup.root_id, clean_rel, sup.reason, now],
             ).map_err(|e| LoomaError::Database(e.to_string()))?;
             restored_asset_suppressions += 1;
+        }
+
+        for act in dump.game_activities {
+            let first_str = act.first_played_at.map(|t| t.to_rfc3339());
+            let last_str = act.last_played_at.map(|t| t.to_rfc3339());
+            tx.execute(
+                "INSERT INTO game_activity_records (
+                    id, work_id, provider, source_key, external_id, source_label, title_hint,
+                    playtime_seconds, peak_seen_seconds, launch_count, first_played_at, last_played_at,
+                    source_exported_at, last_import_sha256, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                ON CONFLICT(provider, source_key, external_id) DO UPDATE SET
+                    work_id = excluded.work_id,
+                    source_label = excluded.source_label,
+                    title_hint = excluded.title_hint,
+                    playtime_seconds = excluded.playtime_seconds,
+                    peak_seen_seconds = excluded.peak_seen_seconds,
+                    launch_count = excluded.launch_count,
+                    first_played_at = excluded.first_played_at,
+                    last_played_at = excluded.last_played_at,
+                    source_exported_at = excluded.source_exported_at,
+                    last_import_sha256 = excluded.last_import_sha256,
+                    updated_at = excluded.updated_at",
+                params![
+                    act.id,
+                    act.work_id,
+                    act.provider,
+                    act.source_key,
+                    act.external_id,
+                    act.source_label,
+                    act.title_hint,
+                    act.playtime_seconds as i64,
+                    act.peak_seen_seconds as i64,
+                    act.launch_count.map(|c| c as i64),
+                    first_str,
+                    last_str,
+                    act.source_exported_at,
+                    act.last_import_sha256,
+                    act.updated_at.to_rfc3339(),
+                ],
+            ).map_err(|e| LoomaError::Database(e.to_string()))?;
         }
 
         // Commit the transaction atomically
@@ -4328,5 +4372,237 @@ impl SearchService for LoomaDb {
             items,
             total_matches,
         })
+    }
+}
+
+impl GameActivityService for LoomaDb {
+    fn list_game_activities_for_work(&self, work_id: &str) -> LoomaResult<Vec<GameActivityRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, work_id, provider, source_key, external_id, source_label, title_hint,
+                    playtime_seconds, peak_seen_seconds, launch_count, first_played_at, last_played_at,
+                    source_exported_at, last_import_sha256, updated_at
+             FROM game_activity_records
+             WHERE work_id = ?1
+             ORDER BY updated_at DESC"
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let rows = stmt.query_map(params![work_id], |row| {
+            let id: String = row.get(0)?;
+            let work_id: String = row.get(1)?;
+            let provider: String = row.get(2)?;
+            let source_key: String = row.get(3)?;
+            let external_id: String = row.get(4)?;
+            let source_label: Option<String> = row.get(5)?;
+            let title_hint: Option<String> = row.get(6)?;
+            let playtime_seconds: i64 = row.get(7)?;
+            let peak_seen_seconds: i64 = row.get(8)?;
+            let launch_count: Option<i64> = row.get(9)?;
+            let first_played_at_str: Option<String> = row.get(10)?;
+            let last_played_at_str: Option<String> = row.get(11)?;
+            let source_exported_at: Option<i64> = row.get(12)?;
+            let last_import_sha256: Option<String> = row.get(13)?;
+            let updated_at_str: String = row.get(14)?;
+
+            let first_played_at = first_played_at_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+            let last_played_at = last_played_at_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+            let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            Ok(GameActivityRecord {
+                id,
+                work_id,
+                provider,
+                source_key,
+                external_id,
+                source_label,
+                title_hint,
+                playtime_seconds: playtime_seconds.max(0) as u64,
+                peak_seen_seconds: peak_seen_seconds.max(0) as u64,
+                launch_count: launch_count.map(|c| c.max(0) as u32),
+                first_played_at,
+                last_played_at,
+                source_exported_at,
+                last_import_sha256,
+                updated_at,
+            })
+        }).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+        }
+        Ok(list)
+    }
+
+    fn get_game_activity(&self, provider: &str, source_key: &str, external_id: &str) -> LoomaResult<Option<GameActivityRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, work_id, provider, source_key, external_id, source_label, title_hint,
+                    playtime_seconds, peak_seen_seconds, launch_count, first_played_at, last_played_at,
+                    source_exported_at, last_import_sha256, updated_at
+             FROM game_activity_records
+             WHERE provider = ?1 AND source_key = ?2 AND external_id = ?3"
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut rows = stmt.query_map(params![provider, source_key, external_id], |row| {
+            let id: String = row.get(0)?;
+            let work_id: String = row.get(1)?;
+            let provider: String = row.get(2)?;
+            let source_key: String = row.get(3)?;
+            let external_id: String = row.get(4)?;
+            let source_label: Option<String> = row.get(5)?;
+            let title_hint: Option<String> = row.get(6)?;
+            let playtime_seconds: i64 = row.get(7)?;
+            let peak_seen_seconds: i64 = row.get(8)?;
+            let launch_count: Option<i64> = row.get(9)?;
+            let first_played_at_str: Option<String> = row.get(10)?;
+            let last_played_at_str: Option<String> = row.get(11)?;
+            let source_exported_at: Option<i64> = row.get(12)?;
+            let last_import_sha256: Option<String> = row.get(13)?;
+            let updated_at_str: String = row.get(14)?;
+
+            let first_played_at = first_played_at_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+            let last_played_at = last_played_at_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+            let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            Ok(GameActivityRecord {
+                id,
+                work_id,
+                provider,
+                source_key,
+                external_id,
+                source_label,
+                title_hint,
+                playtime_seconds: playtime_seconds.max(0) as u64,
+                peak_seen_seconds: peak_seen_seconds.max(0) as u64,
+                launch_count: launch_count.map(|c| c.max(0) as u32),
+                first_played_at,
+                last_played_at,
+                source_exported_at,
+                last_import_sha256,
+                updated_at,
+            })
+        }).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        match rows.next() {
+            Some(res) => Ok(Some(res.map_err(|e| LoomaError::Database(e.to_string()))?)),
+            None => Ok(None),
+        }
+    }
+
+    fn upsert_game_activity(&self, record: &GameActivityRecord) -> LoomaResult<()> {
+        let conn = self.conn.lock();
+        let first_str = record.first_played_at.map(|t| t.to_rfc3339());
+        let last_str = record.last_played_at.map(|t| t.to_rfc3339());
+        let updated_str = record.updated_at.to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO game_activity_records (
+                id, work_id, provider, source_key, external_id, source_label, title_hint,
+                playtime_seconds, peak_seen_seconds, launch_count, first_played_at, last_played_at,
+                source_exported_at, last_import_sha256, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            ON CONFLICT(provider, source_key, external_id) DO UPDATE SET
+                work_id = excluded.work_id,
+                source_label = excluded.source_label,
+                title_hint = excluded.title_hint,
+                playtime_seconds = excluded.playtime_seconds,
+                peak_seen_seconds = excluded.peak_seen_seconds,
+                launch_count = excluded.launch_count,
+                first_played_at = excluded.first_played_at,
+                last_played_at = excluded.last_played_at,
+                source_exported_at = excluded.source_exported_at,
+                last_import_sha256 = excluded.last_import_sha256,
+                updated_at = excluded.updated_at",
+            params![
+                record.id,
+                record.work_id,
+                record.provider,
+                record.source_key,
+                record.external_id,
+                record.source_label,
+                record.title_hint,
+                record.playtime_seconds as i64,
+                record.peak_seen_seconds as i64,
+                record.launch_count.map(|c| c as i64),
+                first_str,
+                last_str,
+                record.source_exported_at,
+                record.last_import_sha256,
+                updated_str
+            ],
+        ).map_err(|e| LoomaError::Database(format!("Failed to upsert game_activity_record: {e}")))?;
+
+        Ok(())
+    }
+
+    fn delete_game_activity(&self, id: &str) -> LoomaResult<bool> {
+        let conn = self.conn.lock();
+        let rows = conn.execute("DELETE FROM game_activity_records WHERE id = ?1", params![id])
+            .map_err(|e| LoomaError::Database(e.to_string()))?;
+        Ok(rows > 0)
+    }
+
+    fn list_all_game_activities(&self) -> LoomaResult<Vec<GameActivityRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, work_id, provider, source_key, external_id, source_label, title_hint,
+                    playtime_seconds, peak_seen_seconds, launch_count, first_played_at, last_played_at,
+                    source_exported_at, last_import_sha256, updated_at
+             FROM game_activity_records
+             ORDER BY updated_at DESC"
+        ).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let work_id: String = row.get(1)?;
+            let provider: String = row.get(2)?;
+            let source_key: String = row.get(3)?;
+            let external_id: String = row.get(4)?;
+            let source_label: Option<String> = row.get(5)?;
+            let title_hint: Option<String> = row.get(6)?;
+            let playtime_seconds: i64 = row.get(7)?;
+            let peak_seen_seconds: i64 = row.get(8)?;
+            let launch_count: Option<i64> = row.get(9)?;
+            let first_played_at_str: Option<String> = row.get(10)?;
+            let last_played_at_str: Option<String> = row.get(11)?;
+            let source_exported_at: Option<i64> = row.get(12)?;
+            let last_import_sha256: Option<String> = row.get(13)?;
+            let updated_at_str: String = row.get(14)?;
+
+            let first_played_at = first_played_at_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+            let last_played_at = last_played_at_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)));
+            let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            Ok(GameActivityRecord {
+                id,
+                work_id,
+                provider,
+                source_key,
+                external_id,
+                source_label,
+                title_hint,
+                playtime_seconds: playtime_seconds.max(0) as u64,
+                peak_seen_seconds: peak_seen_seconds.max(0) as u64,
+                launch_count: launch_count.map(|c| c.max(0) as u32),
+                first_played_at,
+                last_played_at,
+                source_exported_at,
+                last_import_sha256,
+                updated_at,
+            })
+        }).map_err(|e| LoomaError::Database(e.to_string()))?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r.map_err(|e| LoomaError::Database(e.to_string()))?);
+        }
+        Ok(list)
     }
 }

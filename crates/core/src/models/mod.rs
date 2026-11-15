@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod asset;
 pub mod audit;
 pub mod backup;
@@ -14,6 +15,7 @@ pub mod timeline;
 pub mod vault;
 pub mod work;
 
+pub use activity::*;
 pub use asset::*;
 pub use audit::*;
 pub use backup::*;

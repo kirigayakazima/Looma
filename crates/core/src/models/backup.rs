@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use super::{
     Asset, AssetLifecycle, AssetScanSuppression, Collection, Entity, ExperienceEntry,
-    ExperienceLink, ExternalReference, Memory, Relation, SourceRoot, VaultInfo, VaultStats,
+    ExperienceLink, ExternalReference, GameActivityRecord, Memory, Relation, SourceRoot, VaultInfo, VaultStats,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +47,8 @@ pub struct VaultExportDump {
     pub asset_lifecycles: Vec<AssetLifecycle>,
     #[serde(default)]
     pub asset_suppressions: Vec<AssetScanSuppression>,
+    #[serde(default)]
+    pub game_activities: Vec<GameActivityRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

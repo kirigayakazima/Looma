@@ -5,7 +5,7 @@ pub use cloud::{CloudStorage, LocalDirStorage, RemoteObjectMeta};
 use crate::models::{
     Asset, AssetFilter, AssetLifecycle, AssetScanSuppression, BackupResult, Collection,
     CollectionItem, Entity, EntityFilter, ExperienceEntry, ExperienceFilter, ExperienceLink,
-    IntegrityRepairPlan, Memory, Relation, RestoreResult, SourceRoot, SourceRootInspection,
+    GameActivityRecord, IntegrityRepairPlan, Memory, Relation, RestoreResult, SourceRoot, SourceRootInspection,
     TimelineFilter, TimelineItem, VaultDoctorReport, VaultInfo, VaultManifest, VaultSearchResults, VaultStats,
 };
 
@@ -150,6 +150,14 @@ pub trait SourceRootService: Send + Sync {
 
 pub trait SearchService: Send + Sync {
     fn search_vault(&self, query: &str, category: Option<&str>, limit: usize) -> LoomaResult<VaultSearchResults>;
+}
+
+pub trait GameActivityService: Send + Sync {
+    fn list_game_activities_for_work(&self, work_id: &str) -> LoomaResult<Vec<GameActivityRecord>>;
+    fn get_game_activity(&self, provider: &str, source_key: &str, external_id: &str) -> LoomaResult<Option<GameActivityRecord>>;
+    fn upsert_game_activity(&self, record: &GameActivityRecord) -> LoomaResult<()>;
+    fn delete_game_activity(&self, id: &str) -> LoomaResult<bool>;
+    fn list_all_game_activities(&self) -> LoomaResult<Vec<GameActivityRecord>>;
 }
 
 pub type ScanProgressCallback = Box<dyn FnMut(crate::models::ScanProgress) + Send>;
