@@ -708,6 +708,114 @@ impl LoomaCore {
         Ok(entity)
     }
 
+    pub fn set_work_cover_from_file(
+        &self,
+        actor: &str,
+        work_id: &str,
+        file_path: &Path,
+        user_selected: bool,
+    ) -> LoomaResult<Asset> {
+        let _work = self.get_entity(work_id)?
+            .ok_or_else(|| LoomaError::NotFound(format!("Work entity '{work_id}' not found")))?;
+
+        if !file_path.exists() {
+            return Err(LoomaError::NotFound(format!("File does not exist: {}", file_path.display())));
+        }
+        let file_meta = file_path.metadata()?;
+        if file_meta.len() > 50 * 1024 * 1024 {
+            return Err(LoomaError::Validation("Cover image exceeds 50MB safety limit".to_string()));
+        }
+        let bytes = std::fs::read(file_path)?;
+
+        let reader = image::ImageReader::open(file_path)
+            .map_err(|e| LoomaError::Validation(format!("Cannot open image: {e}")))?
+            .with_guessed_format()
+            .map_err(|e| LoomaError::Validation(format!("Unsupported image format: {e}")))?;
+
+        let format = reader.format()
+            .ok_or_else(|| LoomaError::Validation("Unknown image format".to_string()))?;
+
+        let (width, height) = reader.into_dimensions()
+            .map_err(|e| LoomaError::Validation(format!("Corrupted or unsupported image header: {e}")))?;
+
+        if (width as u64) * (height as u64) > 64_000_000 {
+            return Err(LoomaError::Validation("Image resolution exceeds 64 megapixels limit".to_string()));
+        }
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let hash = format!("{:x}", hasher.finalize());
+
+        let (ext, mime_type) = match format {
+            image::ImageFormat::Png => ("png", "image/png"),
+            image::ImageFormat::Jpeg => ("jpg", "image/jpeg"),
+            image::ImageFormat::WebP => ("webp", "image/webp"),
+            image::ImageFormat::Gif => ("gif", "image/gif"),
+            _ => ("bin", "application/octet-stream"),
+        };
+
+        let aspect_ratio = if (width as f64 / height as f64 - 1.0).abs() < 0.15 {
+            "1:1"
+        } else if height > width {
+            "2:3"
+        } else {
+            "landscape"
+        };
+
+        let vault_info = self.get_vault_info()?;
+        let covers_dir = if vault_info.vault_path.as_os_str() == ":memory:" {
+            std::env::temp_dir().join("looma_test_media").join("covers")
+        } else {
+            vault_info.vault_path.join(".looma").join("media").join("covers")
+        };
+        std::fs::create_dir_all(&covers_dir)?;
+
+        let file_name = format!("{hash}.{ext}");
+        let dest_path = covers_dir.join(&file_name);
+        if !dest_path.exists() {
+            std::fs::write(&dest_path, &bytes)?;
+        }
+
+        let rel_path = format!(".looma/media/covers/{file_name}");
+        let asset_id = format!("cover_{}", &hash[..16]);
+        let now = Utc::now();
+        let asset = Asset {
+            id: asset_id.clone(),
+            kind: AssetKind::Image,
+            source: AssetSource::Managed,
+            path: Some(rel_path),
+            size: Some(bytes.len() as u64),
+            hash: Some(hash.clone()),
+            mime_type: Some(mime_type.to_string()),
+            metadata: json!({
+                "role": "work_cover",
+                "user_selected": user_selected,
+                "aspect_ratio": aspect_ratio,
+                "width": width,
+                "height": height,
+                "content_sha256": hash,
+            }),
+            status: AssetStatus::Active,
+            created_at: now,
+            modified_at: now,
+            indexed_at: now,
+        };
+        self.upsert_asset(actor, &asset)?;
+        self.update_work_cover_asset(actor, work_id, Some(asset_id))?;
+
+        Ok(asset)
+    }
+
+    pub fn remove_work_cover(
+        &self,
+        actor: &str,
+        work_id: &str,
+    ) -> LoomaResult<()> {
+        self.update_work_cover_asset(actor, work_id, None)?;
+        Ok(())
+    }
+
     pub fn list_works(
         &self,
         work_type: Option<&str>,
@@ -2890,10 +2998,25 @@ impl LoomaCore {
             None => return Ok(None),
         };
 
-        let source_path = std::path::Path::new(source_path_str);
-        if !source_path.exists() {
+        let vault_info = self.get_vault_info()?;
+        let source_path_buf = if std::path::Path::new(source_path_str).is_absolute() && std::path::Path::new(source_path_str).exists() {
+            std::path::PathBuf::from(source_path_str)
+        } else {
+            let candidate = vault_info.vault_path.join(source_path_str);
+            if candidate.exists() {
+                candidate
+            } else if vault_info.vault_path.as_os_str() == ":memory:" {
+                let fname = std::path::Path::new(source_path_str).file_name().unwrap_or_default();
+                std::env::temp_dir().join("looma_test_media").join("covers").join(fname)
+            } else {
+                std::path::PathBuf::from(source_path_str)
+            }
+        };
+
+        if !source_path_buf.exists() {
             return Ok(None);
         }
+        let source_path = &source_path_buf;
 
         // Bounded safety: if file is larger than 100MB, avoid synchronous full-image memory spikes
         if let Ok(meta) = source_path.metadata() {

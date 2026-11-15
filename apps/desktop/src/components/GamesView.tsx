@@ -27,6 +27,7 @@ import {
 } from '../types';
 import { WorkDetailDrawer } from './WorkDetailDrawer';
 import { SwitchImportModal } from './SwitchImportModal';
+import { CoverImage } from './CoverImage';
 
 interface GamesViewProps {
   assets: Asset[];
@@ -554,6 +555,15 @@ export const GamesView: React.FC<GamesViewProps> = ({
                     }`}
                   >
                     <div>
+                      {/* Cover Poster / Artwork */}
+                      <div className="w-full h-44 rounded-lg overflow-hidden mb-3 border border-neutral-800/80 bg-neutral-950">
+                        <CoverImage
+                          assetId={meta?.cover_asset_id}
+                          title={game.title}
+                          className="w-full h-full"
+                        />
+                      </div>
+
                       {/* Top Bar: Kind Badge & Status */}
                       <div className="flex items-center justify-between mb-2">
                         <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 flex items-center gap-1">

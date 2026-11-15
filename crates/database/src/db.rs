@@ -2085,6 +2085,40 @@ impl BackupService for LoomaDb {
         std::fs::write(backup_path.join("vault_dump.json"), &dump_bytes)
             .map_err(|e| LoomaError::Vault(format!("Failed to write vault_dump.json: {e}")))?;
 
+        // 2b. Export managed media covers (if any) and record their checksums
+        let covers_dir = if self.vault_path.as_os_str() == ":memory:" {
+            std::env::temp_dir().join("looma_test_media").join("covers")
+        } else {
+            self.vault_path.join(".looma").join("media").join("covers")
+        };
+        if covers_dir.exists() && covers_dir.is_dir() {
+            let backup_covers_dir = backup_path.join("media").join("covers");
+            std::fs::create_dir_all(&backup_covers_dir)
+                .map_err(|e| LoomaError::Vault(format!("Failed to create backup covers dir: {e}")))?;
+
+            if let Ok(entries) = std::fs::read_dir(&covers_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let file_name = entry.file_name();
+                        let bytes = std::fs::read(&path)
+                            .map_err(|e| LoomaError::Vault(format!("Failed to read cover for backup: {e}")))?;
+
+                        let dest_path = backup_covers_dir.join(&file_name);
+                        std::fs::write(&dest_path, &bytes)
+                            .map_err(|e| LoomaError::Vault(format!("Failed to write backup cover: {e}")))?;
+
+                        use sha2::{Sha256, Digest};
+                        let mut hasher = Sha256::new();
+                        hasher.update(&bytes);
+                        let hash = format!("{:x}", hasher.finalize());
+                        let rel_key = format!("media/covers/{}", file_name.to_string_lossy());
+                        manifest.checksums.insert(rel_key, hash);
+                    }
+                }
+            }
+        }
+
         // 3. Write manifest.json with updated checksums
         let manifest_json = serde_json::to_string_pretty(&manifest)
             .map_err(LoomaError::Serialization)?;
@@ -2528,6 +2562,47 @@ impl BackupService for LoomaDb {
                     act.updated_at.to_rfc3339(),
                 ],
             ).map_err(|e| LoomaError::Database(e.to_string()))?;
+        }
+
+        // Restore and verify managed media covers
+        let backup_covers_dir = target_dir.join("media").join("covers");
+        if backup_covers_dir.exists() && backup_covers_dir.is_dir() {
+            let target_covers_dir = if self.vault_path.as_os_str() == ":memory:" {
+                std::env::temp_dir().join("looma_test_media").join("covers")
+            } else {
+                self.vault_path.join(".looma").join("media").join("covers")
+            };
+            std::fs::create_dir_all(&target_covers_dir)
+                .map_err(|e| LoomaError::Vault(format!("Failed to create managed covers dir: {e}")))?;
+
+            if let Ok(entries) = std::fs::read_dir(&backup_covers_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let file_name = entry.file_name();
+                        let bytes = std::fs::read(&path)
+                            .map_err(|e| LoomaError::Vault(format!("Failed to read backup cover: {e}")))?;
+
+                        let rel_key = format!("media/covers/{}", file_name.to_string_lossy());
+                        if let Some(expected_hash) = manifest.checksums.get(&rel_key) {
+                            use sha2::{Sha256, Digest};
+                            let mut hasher = Sha256::new();
+                            hasher.update(&bytes);
+                            let actual_hash = format!("{:x}", hasher.finalize());
+                            if actual_hash != *expected_hash {
+                                return Err(LoomaError::Validation(format!(
+                                    "Checksum mismatch for backup cover '{}': expected {}, found {}",
+                                    rel_key, expected_hash, actual_hash
+                                )));
+                            }
+                        }
+
+                        let target_path = target_covers_dir.join(&file_name);
+                        std::fs::write(&target_path, &bytes)
+                            .map_err(|e| LoomaError::Vault(format!("Failed to write restored cover: {e}")))?;
+                    }
+                }
+            }
         }
 
         // Commit the transaction atomically

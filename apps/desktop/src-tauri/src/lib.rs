@@ -620,6 +620,34 @@ fn list_game_activities(
 }
 
 #[tauri::command]
+fn pick_image_file() -> Result<Option<String>, String> {
+    let file = rfd::FileDialog::new()
+        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif"])
+        .pick_file();
+    Ok(file.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn set_work_cover_from_file(
+    work_id: String,
+    file_path: String,
+    state: State<'_, AppState>,
+) -> Result<Asset, String> {
+    let p = std::path::Path::new(&file_path);
+    state.core.set_work_cover_from_file("desktop", &work_id, p, true)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_work_cover(
+    work_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.core.remove_work_cover("desktop", &work_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn detect_game_candidates(
     root_path: String,
     state: State<'_, AppState>,
@@ -843,7 +871,10 @@ pub fn run() {
             read_file_content,
             preview_switch_import,
             commit_switch_import,
-            list_game_activities
+            list_game_activities,
+            pick_image_file,
+            set_work_cover_from_file,
+            remove_work_cover
         ])
         .run(tauri::generate_context!())
     {

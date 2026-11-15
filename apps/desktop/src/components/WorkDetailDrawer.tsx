@@ -15,6 +15,7 @@ import {
   Trash2,
   Gamepad2,
   AlertTriangle,
+  Image as ImageIcon,
 } from 'lucide-react';
 import {
   Asset,
@@ -24,6 +25,7 @@ import {
   GameActivityRecord,
 } from '../types';
 import { ExperienceModal } from './ExperienceModal';
+import { CoverImage } from './CoverImage';
 
 interface WorkDetailDrawerProps {
   workId: string | null;
@@ -65,6 +67,9 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
   // Alias addition
   const [showAddAlias, setShowAddAlias] = useState(false);
   const [newAliasInput, setNewAliasInput] = useState('');
+
+  // Cover uploading state
+  const [uploadingCover, setUploadingCover] = useState(false);
 
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
     try {
@@ -218,6 +223,48 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
     onClose();
   };
 
+  // Pick & Set work cover
+  const handlePickCover = async () => {
+    if (!workId) return;
+    try {
+      setUploadingCover(true);
+      setErrorMsg(null);
+      const filePath = await safeInvoke<string | null>('pick_image_file');
+      if (!filePath) return;
+      const res = await safeInvoke('set_work_cover_from_file', {
+        workId,
+        filePath,
+      });
+      if (res) {
+        await loadSummary();
+        if (onRefreshAll) await onRefreshAll();
+      }
+    } catch (err: any) {
+      console.error('Failed to set work cover:', err);
+      setErrorMsg(err?.message || String(err));
+    } finally {
+      setUploadingCover(false);
+    }
+  };
+
+  // Remove work cover
+  const handleRemoveCover = async () => {
+    if (!workId) return;
+    if (!confirm('确定移除该作品的封面关联吗？')) return;
+    try {
+      setUploadingCover(true);
+      setErrorMsg(null);
+      await safeInvoke('remove_work_cover', { workId });
+      await loadSummary();
+      if (onRefreshAll) await onRefreshAll();
+    } catch (err: any) {
+      console.error('Failed to remove work cover:', err);
+      setErrorMsg(err?.message || String(err));
+    } finally {
+      setUploadingCover(false);
+    }
+  };
+
   // Link asset
   const handleLinkAsset = async (assetId: string) => {
     if (!workId) return;
@@ -303,6 +350,68 @@ export const WorkDetailDrawer: React.FC<WorkDetailDrawerProps> = ({
                     {errorMsg}
                   </div>
                 )}
+                {/* Cover Hero Card */}
+                <div className="flex flex-col sm:flex-row gap-5 p-4 rounded-xl bg-neutral-950 border border-neutral-850 items-center sm:items-start">
+                  <div className="w-32 h-44 sm:w-28 sm:h-40 flex-shrink-0 shadow-lg rounded-xl overflow-hidden border border-neutral-800 bg-neutral-900">
+                    <CoverImage
+                      assetId={meta?.cover_asset_id}
+                      title={work?.title}
+                      className="w-full h-full"
+                    />
+                  </div>
+                  <div className="flex-1 space-y-3 min-w-0 flex flex-col justify-between self-stretch">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-neutral-800 text-neutral-400">
+                          {meta?.work_type || 'work'}
+                        </span>
+                        <h4 className="text-base font-bold text-white truncate">{work?.title}</h4>
+                      </div>
+                      <p className="text-xs text-neutral-400 mt-1">
+                        {meta?.cover_asset_id
+                          ? '已设置个人库作品封面（本地持久化媒体资产）'
+                          : '尚未设置封面海报'}
+                      </p>
+                    </div>
+
+                    <div className="space-y-2 pt-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handlePickCover}
+                          disabled={uploadingCover}
+                          className="px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
+                        >
+                          <ImageIcon className="w-3.5 h-3.5" />
+                          <span>
+                            {uploadingCover
+                              ? '正在处理...'
+                              : meta?.cover_asset_id
+                              ? '更换封面'
+                              : '选择本地图片为封面'}
+                          </span>
+                        </button>
+
+                        {meta?.cover_asset_id && (
+                          <button
+                            type="button"
+                            onClick={handleRemoveCover}
+                            disabled={uploadingCover}
+                            className="px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-red-400 border border-neutral-800 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
+                            title="解除封面绑定（不会破坏已备份的持久化文件）"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>移除封面</span>
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-neutral-500 leading-relaxed">
+                        支持 JPG, PNG, WEBP 等。选定封面将持久保存在媒体库，完整纳入 Vault 备份，并在游戏库网格自动生成缩略图展示。
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Status & Aliases Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl bg-neutral-950 border border-neutral-850">
                   <div className="flex items-center gap-2">
