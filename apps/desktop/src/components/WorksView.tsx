@@ -4,7 +4,6 @@ import {
   Film,
   Plus,
   Search,
-  ExternalLink,
   ChevronRight,
   Tv,
   BookOpen,
@@ -16,18 +15,11 @@ import {
   Clock,
   PauseCircle,
   XCircle,
-  Link as LinkIcon,
-  Trash2,
   X,
-  Image as ImageIcon,
   Minus,
-  Folder,
-  FolderPlus,
-  AlertTriangle,
-  RotateCw,
 } from 'lucide-react';
-import { Entity, Asset, ExternalReference, WorkSummary, WorkType, RecordStatus } from '../types';
-import { MarkdownRenderer } from './MarkdownRenderer';
+import { Entity, Asset, WorkType, RecordStatus } from '../types';
+import { WorkDetailDrawer } from './WorkDetailDrawer';
 
 interface WorksViewProps {
   assets: Asset[];
@@ -49,13 +41,9 @@ export const WorksView: React.FC<WorksViewProps> = ({
 
   // Active work detail drawer
   const [activeWorkId, setActiveWorkId] = useState<string | null>(null);
-  const [activeSummary, setActiveSummary] = useState<WorkSummary | null>(null);
-  const [loadingSummary, setLoadingSummary] = useState(false);
 
   // Modals
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showAddRefModal, setShowAddRefModal] = useState(false);
-  const [showLinkAssetModal, setShowLinkAssetModal] = useState(false);
 
   // Create Form State
   const [newTitle, setNewTitle] = useState('');
@@ -66,16 +54,6 @@ export const WorksView: React.FC<WorksViewProps> = ({
   const [newDesc, setNewDesc] = useState('');
   const [newTotalPos, setNewTotalPos] = useState<string>('');
   const [creating, setCreating] = useState(false);
-
-  // Add Ref Form State
-  const [refProvider, setRefProvider] = useState('bilibili');
-  const [refTitle, setRefTitle] = useState('');
-  const [refUrl, setRefUrl] = useState('');
-  const [refIsPrimary, setRefIsPrimary] = useState(false);
-  const [addingRef, setAddingRef] = useState(false);
-
-  // Link Asset Search
-  const [assetSearch, setAssetSearch] = useState('');
 
   // Safe IPC invoke
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
@@ -105,36 +83,6 @@ export const WorksView: React.FC<WorksViewProps> = ({
     loadWorks();
   }, [loadWorks]);
 
-  // Load active work summary
-  const loadWorkSummary = useCallback(async (id: string) => {
-    setLoadingSummary(true);
-    try {
-      const summary = await safeInvoke<WorkSummary>('get_work_summary', { id });
-      setActiveSummary(summary || null);
-    } finally {
-      setLoadingSummary(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (activeWorkId) {
-      loadWorkSummary(activeWorkId);
-    } else {
-      setActiveSummary(null);
-    }
-  }, [activeWorkId, loadWorkSummary]);
-
-  // Open external URL in system browser
-  const handleOpenUrl = async (url: string) => {
-    if (!url) return;
-    try {
-      await invoke('open_external_url', { url });
-    } catch (e) {
-      console.error('Failed to open URL:', e);
-      window.open(url, '_blank');
-    }
-  };
-
   // Quick Stepper (+1 / -1)
   const handleStepProgress = async (work: Entity, delta: number, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -154,18 +102,6 @@ export const WorksView: React.FC<WorksViewProps> = ({
     });
 
     await loadWorks();
-    if (activeWorkId === work.id) {
-      await loadWorkSummary(work.id);
-    }
-  };
-
-  // Change Status
-  const handleChangeStatus = async (id: string, newSt: RecordStatus) => {
-    await safeInvoke('update_work_status', { id, status: newSt });
-    await loadWorks();
-    if (activeWorkId === id) {
-      await loadWorkSummary(id);
-    }
   };
 
   // Create Work
@@ -206,120 +142,6 @@ export const WorksView: React.FC<WorksViewProps> = ({
       await onRefreshAll();
     } finally {
       setCreating(false);
-    }
-  };
-
-  // Add External Reference
-  const handleAddRef = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeWorkId || !refUrl.trim() || !refTitle.trim()) return;
-    setAddingRef(true);
-    try {
-      const newRef: ExternalReference = {
-        id: 'ref_' + Math.random().toString(36).substring(2, 9),
-        entity_id: activeWorkId,
-        provider: refProvider,
-        title: refTitle.trim(),
-        url: refUrl.trim(),
-        description: null,
-        metadata: refIsPrimary ? { is_primary: true } : {},
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      await safeInvoke('create_external_reference', { reference: newRef });
-      if (refIsPrimary && activeWorkId) {
-        await safeInvoke('set_primary_external_reference', {
-          entityId: activeWorkId,
-          referenceId: newRef.id,
-        });
-      }
-      setShowAddRefModal(false);
-      setRefTitle('');
-      setRefUrl('');
-      setRefIsPrimary(false);
-      await loadWorkSummary(activeWorkId);
-    } finally {
-      setAddingRef(false);
-    }
-  };
-
-  // Set Primary External Reference
-  const handleSetPrimaryRef = async (refId: string) => {
-    if (!activeWorkId) return;
-    await safeInvoke('set_primary_external_reference', {
-      entityId: activeWorkId,
-      referenceId: refId,
-    });
-    await loadWorkSummary(activeWorkId);
-  };
-
-  // Delete External Reference
-  const handleDeleteRef = async (refId: string) => {
-    if (!activeWorkId) return;
-    await safeInvoke('delete_external_reference', { id: refId });
-    await loadWorkSummary(activeWorkId);
-  };
-
-  // Link Asset to Work
-  const handleLinkAsset = async (assetId: string) => {
-    if (!activeWorkId) return;
-    const relation = {
-      id: 'rel_' + Math.random().toString(36).substring(2, 9),
-      source_id: activeWorkId,
-      source_type: 'entity',
-      relation_type: 'attaches',
-      target_id: assetId,
-      target_type: 'asset',
-      metadata: {},
-      created_at: new Date().toISOString(),
-    };
-    await safeInvoke('create_relation', { relation });
-    setShowLinkAssetModal(false);
-    await loadWorkSummary(activeWorkId);
-  };
-
-  // Unlink Asset
-  const handleUnlinkAsset = async (assetId: string) => {
-    if (!activeWorkId) return;
-    await safeInvoke('delete_relation_between', {
-      sourceId: activeWorkId,
-      targetId: assetId,
-    });
-    await safeInvoke('delete_relation_between', {
-      sourceId: assetId,
-      targetId: activeWorkId,
-    });
-    await loadWorkSummary(activeWorkId);
-  };
-
-  // Link Folder as Directory Asset via Native Folder Picker
-  const handleLinkFolder = async () => {
-    if (!activeWorkId) return;
-    const picked = await safeInvoke<string>('pick_folder');
-    if (picked) {
-      await safeInvoke('link_work_directory', {
-        workId: activeWorkId,
-        path: picked,
-      });
-      await loadWorkSummary(activeWorkId);
-      await loadWorks();
-      if (onRefreshAll) onRefreshAll();
-    }
-  };
-
-  // Relocate Missing Directory Asset to a new folder
-  const handleRelocateAsset = async (oldAssetId: string) => {
-    if (!activeWorkId) return;
-    const picked = await safeInvoke<string>('pick_folder');
-    if (picked) {
-      await safeInvoke('relocate_work_directory', {
-        workId: activeWorkId,
-        oldAssetId,
-        newPath: picked,
-      });
-      await loadWorkSummary(activeWorkId);
-      await loadWorks();
-      if (onRefreshAll) onRefreshAll();
     }
   };
 
@@ -669,325 +491,17 @@ export const WorksView: React.FC<WorksViewProps> = ({
         </div>
       )}
 
-      {/* Work Detail Modal / Drawer */}
+      {/* Unified Work Detail Drawer */}
       {activeWorkId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-            {/* Modal Header */}
-            <div className="p-5 border-b border-neutral-800 flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div className="p-2.5 rounded-xl bg-neutral-800 text-indigo-400">
-                  {activeSummary ? getTypeIcon(activeSummary.entity.entity_type) : <Film className="w-5 h-5" />}
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-neutral-100">
-                    {activeSummary?.entity.title || '加载作品详情...'}
-                  </h3>
-                  {activeSummary?.work_metadata?.original_title && (
-                    <p className="text-xs text-neutral-400">
-                      {activeSummary.work_metadata.original_title}
-                    </p>
-                  )}
-                  {activeSummary?.work_metadata?.aliases && activeSummary.work_metadata.aliases.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {activeSummary.work_metadata.aliases.map((alias, idx) => (
-                        <span key={idx} className="text-[10px] px-1.5 py-0.2 rounded bg-neutral-800 text-neutral-300 border border-neutral-700/50">
-                          {alias}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={() => setActiveWorkId(null)}
-                  className="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Modal Body */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-6">
-              {loadingSummary || !activeSummary ? (
-                <div className="py-12 text-center text-xs text-neutral-500">
-                  加载中...
-                </div>
-              ) : (
-                <>
-                  {/* Status & Progress Card */}
-                  <div className="bg-neutral-950/80 border border-neutral-800/80 rounded-xl p-4 space-y-3">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div>
-                        <span className="text-xs text-neutral-400">消费状态:</span>
-                        <div className="flex items-center space-x-1.5 mt-1">
-                          {(['in_progress', 'planned', 'completed', 'paused', 'dropped'] as RecordStatus[]).map((st) => (
-                            <button
-                              key={st}
-                              onClick={() => handleChangeStatus(activeSummary.entity.id, st)}
-                              className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
-                                activeSummary.work_metadata?.status === st
-                                  ? 'bg-indigo-600 text-white font-medium'
-                                  : 'bg-neutral-850 text-neutral-400 hover:text-neutral-200'
-                              }`}
-                            >
-                              {st === 'in_progress' ? '进行中' : st === 'planned' ? '想看/玩' : st === 'completed' ? '已完成' : st === 'paused' ? '搁置' : '放弃'}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Progress Controls */}
-                      <div className="flex items-center space-x-2">
-                        <div className="text-right">
-                          <span className="text-xs text-neutral-400">当前进度:</span>
-                          <p className="text-sm font-bold font-mono text-neutral-100">
-                            第 {activeSummary.work_metadata?.progress?.position ?? 0}{' '}
-                            {activeSummary.work_metadata?.progress?.unit || '集'}
-                          </p>
-                        </div>
-                        <div className="flex items-center space-x-1">
-                          <button
-                            onClick={() => handleStepProgress(activeSummary.entity, -1)}
-                            className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 transition-colors"
-                          >
-                            <Minus className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleStepProgress(activeSummary.entity, 1)}
-                            className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 transition-colors"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* External References (网上入口 / Bilibili / Bangumi / Steam) */}
-                  <div className="space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-semibold text-neutral-300 uppercase tracking-wider flex items-center space-x-1.5">
-                        <LinkIcon className="w-3.5 h-3.5 text-indigo-400" />
-                        <span>外部在线入口 ({activeSummary.external_references.length})</span>
-                      </h4>
-                      <button
-                        onClick={() => setShowAddRefModal(true)}
-                        className="text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 flex items-center space-x-1 transition-colors"
-                      >
-                        <Plus className="w-3 h-3" />
-                        <span>添加入口</span>
-                      </button>
-                    </div>
-
-                    {activeSummary.external_references.length === 0 ? (
-                      <p className="text-xs text-neutral-500 py-3 text-center border border-dashed border-neutral-800 rounded-lg">
-                        暂无外部在线入口，可添加 Bilibili、Bangumi、Steam 或官网页面
-                      </p>
-                    ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {activeSummary.external_references.map((ref) => {
-                          const isPrimary = (ref.metadata as any)?.is_primary === true || (ref.metadata as any)?.primary === true;
-                          return (
-                            <div
-                              key={ref.id}
-                              className={`flex items-center justify-between p-2.5 rounded-lg border transition-colors ${
-                                isPrimary
-                                  ? 'bg-indigo-950/20 border-indigo-500/40 hover:border-indigo-500/60'
-                                  : 'bg-neutral-950/60 border border-neutral-800 hover:border-neutral-700'
-                              }`}
-                            >
-                              <div
-                                onClick={() => handleOpenUrl(ref.url)}
-                                className="flex items-center space-x-2 flex-1 cursor-pointer truncate mr-2"
-                              >
-                                <ExternalLink className={`w-3.5 h-3.5 shrink-0 ${isPrimary ? 'text-indigo-300' : 'text-indigo-400'}`} />
-                                <div className="truncate">
-                                  <div className="flex items-center space-x-1.5 truncate">
-                                    <p className="text-xs font-medium text-neutral-200 truncate">
-                                      {ref.title}
-                                    </p>
-                                    {isPrimary && (
-                                      <span className="shrink-0 text-[10px] px-1 py-0.2 rounded bg-indigo-500/30 text-indigo-200 border border-indigo-500/40 font-medium">
-                                        🔗 主入口
-                                      </span>
-                                    )}
-                                  </div>
-                                  <p className="text-[11px] text-neutral-500 truncate">{ref.url}</p>
-                                </div>
-                              </div>
-                              <div className="flex items-center space-x-1 shrink-0">
-                                {!isPrimary && (
-                                  <button
-                                    onClick={() => handleSetPrimaryRef(ref.id)}
-                                    className="p-1 text-neutral-500 hover:text-indigo-400 transition-colors cursor-pointer"
-                                    title="设为主入口"
-                                  >
-                                    <LinkIcon className="w-3 h-3" />
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => handleDeleteRef(ref.id)}
-                                  className="p-1 text-neutral-500 hover:text-rose-400 transition-colors cursor-pointer"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Linked Assets (本地关联资源与目录) */}
-                  <div className="space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <h4 className="text-xs font-semibold text-neutral-300 uppercase tracking-wider flex items-center space-x-1.5">
-                        <Folder className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>关联本地文件与目录 ({activeSummary.linked_assets.length})</span>
-                      </h4>
-                      <div className="flex items-center space-x-1.5">
-                        <button
-                          onClick={handleLinkFolder}
-                          className="text-xs px-2.5 py-1 rounded bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 flex items-center space-x-1 transition-colors cursor-pointer"
-                          title="选择本地番剧/漫画/游戏/书籍目录关联至此档案"
-                        >
-                          <FolderPlus className="w-3 h-3" />
-                          <span>关联本地目录</span>
-                        </button>
-                        <button
-                          onClick={() => setShowLinkAssetModal(true)}
-                          className="text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 flex items-center space-x-1 transition-colors cursor-pointer"
-                        >
-                          <Plus className="w-3 h-3" />
-                          <span>关联文件/海报</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {activeSummary.linked_assets.length === 0 ? (
-                      <p className="text-xs text-neutral-500 py-3 text-center border border-dashed border-neutral-800 rounded-lg">
-                        暂未关联本地资源（支持纯线上追踪），点击上方按钮可挂载本地目录或单文件资产
-                      </p>
-                    ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        {activeSummary.linked_assets.map((asset) => {
-                          const isDir = asset.kind === 'directory';
-                          const isMissing = asset.status === 'missing';
-                          return (
-                            <div
-                              key={asset.id}
-                              className={`relative group bg-neutral-950 border rounded-lg p-2.5 flex flex-col justify-between transition-colors ${
-                                isMissing
-                                  ? 'border-rose-500/40 bg-rose-950/10'
-                                  : 'border-neutral-800 hover:border-neutral-700'
-                              }`}
-                            >
-                              <div className="flex items-start justify-between gap-2 mb-1.5">
-                                <div className="flex items-center space-x-2 truncate">
-                                  {isDir ? (
-                                    <Folder className={`w-4 h-4 shrink-0 ${isMissing ? 'text-rose-400' : 'text-amber-400'}`} />
-                                  ) : (
-                                    <ImageIcon className="w-4 h-4 text-emerald-400 shrink-0" />
-                                  )}
-                                  <div className="truncate">
-                                    <p className="text-xs font-medium text-neutral-200 truncate">
-                                      {asset.path?.split(/[\\/]/).pop() || asset.id}
-                                    </p>
-                                    <p className="text-[11px] text-neutral-500 truncate" title={asset.path || ''}>
-                                      {asset.path || '无本地路径'}
-                                    </p>
-                                  </div>
-                                </div>
-                                {isMissing && (
-                                  <span className="shrink-0 inline-flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-rose-500/20 text-rose-300 border border-rose-500/30">
-                                    <AlertTriangle className="w-2.5 h-2.5" />
-                                    <span>失效</span>
-                                  </span>
-                                )}
-                              </div>
-
-                              <div className="flex items-center justify-between pt-1.5 border-t border-neutral-850/80 text-[11px] text-neutral-400">
-                                <span>{isDir ? '本地目录' : asset.kind}</span>
-                                <div className="flex items-center space-x-2">
-                                  {isMissing && isDir && (
-                                    <button
-                                      onClick={() => handleRelocateAsset(asset.id)}
-                                      className="text-amber-400 hover:underline flex items-center space-x-1 cursor-pointer"
-                                      title="重新选择该目录在本地的新位置"
-                                    >
-                                      <RotateCw className="w-3 h-3" />
-                                      <span>重新定位</span>
-                                    </button>
-                                  )}
-                                  <button
-                                    onClick={() => handleUnlinkAsset(asset.id)}
-                                    className="text-rose-400 hover:underline cursor-pointer"
-                                  >
-                                    解除
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Linked Memories (手记与感悟) */}
-                  <div className="space-y-2.5">
-                    <h4 className="text-xs font-semibold text-neutral-300 uppercase tracking-wider flex items-center space-x-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-                      <span>观后心得与日记 ({activeSummary.linked_memories.length})</span>
-                    </h4>
-
-                    {activeSummary.linked_memories.length === 0 ? (
-                      <p className="text-xs text-neutral-500 py-3 text-center border border-dashed border-neutral-800 rounded-lg">
-                        暂无心得手记，前往左侧「记忆手记」即可为该作品书写评测
-                      </p>
-                    ) : (
-                      <div className="space-y-2">
-                        {activeSummary.linked_memories.map((mem) => (
-                          <div
-                            key={mem.id}
-                            className="p-3 rounded-lg bg-neutral-950/60 border border-neutral-800"
-                          >
-                            <div className="flex items-center justify-between mb-1.5">
-                              <span className="text-xs font-semibold text-neutral-200">
-                                {mem.title}
-                              </span>
-                              <span className="text-[11px] text-neutral-500">
-                                {new Date(mem.recorded_at).toLocaleDateString()}
-                              </span>
-                            </div>
-                            <div className="text-xs text-neutral-400">
-                              <MarkdownRenderer content={mem.content} />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Description */}
-                  {activeSummary.entity.description && (
-                    <div className="space-y-1.5 pt-2 border-t border-neutral-800">
-                      <span className="text-xs text-neutral-400">剧情简介 / 备注:</span>
-                      <p className="text-xs text-neutral-300 leading-relaxed bg-neutral-950/40 p-3 rounded-lg border border-neutral-850">
-                        {activeSummary.entity.description}
-                      </p>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </div>
+        <WorkDetailDrawer
+          workId={activeWorkId}
+          onClose={() => setActiveWorkId(null)}
+          onRefreshAll={async () => {
+            await loadWorks();
+            if (onRefreshAll) await onRefreshAll();
+          }}
+          availableAssets={assets}
+        />
       )}
 
       {/* Create Work Modal */}
@@ -1139,151 +653,6 @@ export const WorksView: React.FC<WorksViewProps> = ({
         </div>
       )}
 
-      {/* Add External Reference Modal */}
-      {showAddRefModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fadeIn">
-          <form
-            onSubmit={handleAddRef}
-            className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-md p-5 shadow-2xl space-y-4"
-          >
-            <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
-              <h4 className="text-sm font-bold text-neutral-100">添加外部在线入口</h4>
-              <button
-                type="button"
-                onClick={() => setShowAddRefModal(false)}
-                className="text-neutral-400 hover:text-neutral-200"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-neutral-300 block mb-1">平台 / 来源</label>
-                <select
-                  value={refProvider}
-                  onChange={(e) => setRefProvider(e.target.value)}
-                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-100"
-                >
-                  <option value="bilibili">哔哩哔哩 (Bilibili)</option>
-                  <option value="bangumi">Bangumi 番组计划</option>
-                  <option value="steam">Steam 游戏主页</option>
-                  <option value="website">官方网站</option>
-                  <option value="github">GitHub</option>
-                  <option value="other">其他链接</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs text-neutral-300 block mb-1">显示名称</label>
-                <input
-                  type="text"
-                  required
-                  value={refTitle}
-                  onChange={(e) => setRefTitle(e.target.value)}
-                  placeholder="例如：B站追番入口 / Bangumi 条目"
-                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-100"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs text-neutral-300 block mb-1">完整网址 (URL)</label>
-                <input
-                  type="url"
-                  required
-                  value={refUrl}
-                  onChange={(e) => setRefUrl(e.target.value)}
-                  placeholder="https://..."
-                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-100 font-mono"
-                />
-              </div>
-
-              <div className="flex items-center space-x-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="refIsPrimary"
-                  checked={refIsPrimary}
-                  onChange={(e) => setRefIsPrimary(e.target.checked)}
-                  className="rounded border-neutral-800 text-indigo-600 focus:ring-0 cursor-pointer"
-                />
-                <label htmlFor="refIsPrimary" className="text-xs text-neutral-300 cursor-pointer select-none">
-                  设为此作品的主入口 (Primary Reference)
-                </label>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-neutral-800">
-              <button
-                type="button"
-                onClick={() => setShowAddRefModal(false)}
-                className="px-3 py-1 rounded text-xs text-neutral-400 hover:text-neutral-200"
-              >
-                取消
-              </button>
-              <button
-                type="submit"
-                disabled={addingRef}
-                className="px-3.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium"
-              >
-                {addingRef ? '添加中...' : '确认添加'}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Link Asset Modal */}
-      {showLinkAssetModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-lg p-5 shadow-2xl space-y-4 max-h-[80vh] flex flex-col">
-            <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
-              <h4 className="text-sm font-bold text-neutral-100">选择要关联的本地文件</h4>
-              <button
-                onClick={() => setShowLinkAssetModal(false)}
-                className="text-neutral-400 hover:text-neutral-200"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500" />
-              <input
-                type="text"
-                value={assetSearch}
-                onChange={(e) => setAssetSearch(e.target.value)}
-                placeholder="按文件名搜索已扫描的文件..."
-                className="w-full bg-neutral-950 border border-neutral-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-neutral-100"
-              />
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-1.5 max-h-64">
-              {assets
-                .filter((a) => {
-                  if (!assetSearch.trim()) return true;
-                  const q = assetSearch.toLowerCase();
-                  return (a.path || '').toLowerCase().includes(q);
-                })
-                .slice(0, 30)
-                .map((a) => (
-                  <div
-                    key={a.id}
-                    onClick={() => handleLinkAsset(a.id)}
-                    className="flex items-center justify-between p-2 rounded-lg bg-neutral-950/60 hover:bg-neutral-800 border border-neutral-850 cursor-pointer transition-colors"
-                  >
-                    <div className="flex items-center space-x-2 truncate">
-                      <ImageIcon className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span className="text-xs text-neutral-200 truncate">
-                        {a.path?.split(/[\\/]/).pop()}
-                      </span>
-                    </div>
-                    <span className="text-[10px] text-indigo-400 font-medium shrink-0">点击关联</span>
-                  </div>
-                ))}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

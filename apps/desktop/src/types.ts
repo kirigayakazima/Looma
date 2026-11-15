@@ -29,6 +29,7 @@ export interface GameCandidate {
   file_count: number;
   matched_work_id?: string | null;
   matched_work_title?: string | null;
+  already_linked?: boolean;
 }
 
 export interface Asset {

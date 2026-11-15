@@ -458,6 +458,7 @@ pub struct GameCandidate {
     pub file_count: usize,
     pub matched_work_id: Option<String>,
     pub matched_work_title: Option<String>,
+    pub already_linked: bool,
 }
 
 #[tauri::command]
@@ -626,12 +627,36 @@ fn detect_game_candidates(
 
             for w in &existing_games {
                 let norm_w = w.title.to_lowercase().replace(' ', "");
-                if norm_w == norm_deduced || norm_w.contains(&norm_deduced) || norm_deduced.contains(&norm_w) {
+                let mut is_match = norm_w == norm_deduced || norm_w.contains(&norm_deduced) || norm_deduced.contains(&norm_w);
+                if !is_match {
+                    if let Some(meta) = w.as_work_metadata() {
+                        if let Some(ref orig) = meta.original_title {
+                            let norm_orig = orig.to_lowercase().replace(' ', "");
+                            if norm_orig == norm_deduced || norm_orig.contains(&norm_deduced) || norm_deduced.contains(&norm_orig) {
+                                is_match = true;
+                            }
+                        }
+                        if !is_match {
+                            for al in &meta.aliases {
+                                let norm_al = al.to_lowercase().replace(' ', "");
+                                if norm_al == norm_deduced || norm_al.contains(&norm_deduced) || norm_deduced.contains(&norm_al) {
+                                    is_match = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if is_match {
                     matched_work_id = Some(w.id.clone());
                     matched_work_title = Some(w.title.clone());
                     break;
                 }
             }
+
+            let norm_path = looma_core::normalize_directory_path(&path_str);
+            let already_linked = state.core.get_asset_by_path(&norm_path).unwrap_or(None).is_some()
+                || state.core.get_asset_by_path(&path_str).unwrap_or(None).is_some();
 
             candidates.push(GameCandidate {
                 id: format!("cand_{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
@@ -642,6 +667,7 @@ fn detect_game_candidates(
                 file_count,
                 matched_work_id,
                 matched_work_title,
+                already_linked,
             });
         }
     }
