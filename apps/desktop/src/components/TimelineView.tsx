@@ -18,6 +18,8 @@ import {
   Clock,
   X,
   Compass,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -38,9 +40,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 }) => {
   const [timelineItems, setTimelineItems] = useState<TimelineItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [track, setTrack] = useState<'personal' | 'system' | 'all'>('personal');
   const [selectedType, setSelectedType] = useState<'all' | 'asset' | 'entity' | 'memory' | 'experience'>('all');
   const [selectedYear, setSelectedYear] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [undatedExpanded, setUndatedExpanded] = useState<boolean>(true);
 
   // Selected item modal detail
   const [activeItem, setActiveItem] = useState<TimelineItem | null>(null);
@@ -60,6 +64,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     try {
       const items = await safeInvoke<TimelineItem[]>('query_timeline', {
         filter: {
+          track,
           item_types: selectedType === 'all' ? undefined : [selectedType],
         },
       });
@@ -70,43 +75,51 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         // Fallback aggregation client-side if offline / web preview
         const combined: TimelineItem[] = [];
 
-        assets.forEach((a) => {
-          const p = a.path || a.id;
-          const fname = p.split(/[\\/]/).pop() || a.id;
-          combined.push({
-            id: a.id,
-            item_type: 'asset',
-            timestamp: a.modified_at || a.created_at,
-            title: fname,
-            description: a.path,
-            badge: a.kind,
-            metadata: (a.metadata as Record<string, unknown>) || {},
+        if (track === 'system' || track === 'all') {
+          assets.forEach((a) => {
+            const p = a.path || a.id;
+            const fname = p.split(/[\\/]/).pop() || a.id;
+            combined.push({
+              id: a.id,
+              item_type: 'asset',
+              timestamp: a.modified_at || a.created_at,
+              title: fname,
+              description: a.path,
+              badge: a.kind,
+              metadata: (a.metadata as Record<string, unknown>) || {},
+              track: 'system',
+            });
           });
-        });
 
-        entities.forEach((e) => {
-          combined.push({
-            id: e.id,
-            item_type: 'entity',
-            timestamp: e.created_at,
-            title: e.title,
-            description: e.description,
-            badge: e.entity_type,
-            metadata: e.properties,
+          entities.forEach((e) => {
+            combined.push({
+              id: e.id,
+              item_type: 'entity',
+              timestamp: e.created_at,
+              title: e.title,
+              description: e.description,
+              badge: e.entity_type,
+              metadata: e.properties,
+              track: 'system',
+            });
           });
-        });
+        }
 
-        memories.forEach((m) => {
-          combined.push({
-            id: m.id,
-            item_type: 'memory',
-            timestamp: m.recorded_at,
-            title: m.title,
-            description: m.content,
-            badge: m.category,
-            metadata: m.metadata,
+        if (track === 'personal' || track === 'all') {
+          memories.forEach((m) => {
+            combined.push({
+              id: m.id,
+              item_type: 'memory',
+              timestamp: m.recorded_at,
+              title: m.title,
+              description: m.content,
+              badge: m.category,
+              metadata: m.metadata,
+              track: 'personal',
+              occurred_precision: 'instant',
+            });
           });
-        });
+        }
 
         combined.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
         setTimelineItems(combined);
@@ -118,7 +131,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   useEffect(() => {
     loadTimeline();
-  }, [selectedType, assets.length, entities.length, memories.length]);
+  }, [track, selectedType, assets.length, entities.length, memories.length]);
 
   // Load preview when active asset item selected
   useEffect(() => {
@@ -136,17 +149,13 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     }
   }, [activeItem, assets]);
 
-  // Available years from timeline items
-  const availableYears = useMemo(() => {
-    const years = new Set<string>();
-    timelineItems.forEach((item) => {
-      const y = new Date(item.timestamp).getFullYear().toString();
-      if (!isNaN(parseInt(y))) {
-        years.add(y);
-      }
-    });
-    return Array.from(years).sort((a, b) => b.localeCompare(a));
-  }, [timelineItems]);
+  const isUndated = (item: TimelineItem) => {
+    return (
+      item.occurred_precision === 'unknown' ||
+      item.metadata?.occurred_precision === 'unknown' ||
+      item.metadata?.is_occurred_time_unknown === true
+    );
+  };
 
   // Filter items by search query and year
   const filteredItems = useMemo(() => {
@@ -168,11 +177,31 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     });
   }, [timelineItems, selectedYear, searchQuery]);
 
-  // Group items by Year and Month: { "2026": { "10月": [...] } }
+  const undatedItems = useMemo(() => {
+    return filteredItems.filter(isUndated);
+  }, [filteredItems]);
+
+  const datedItems = useMemo(() => {
+    return filteredItems.filter((item) => !isUndated(item));
+  }, [filteredItems]);
+
+  // Available years from dated timeline items
+  const availableYears = useMemo(() => {
+    const years = new Set<string>();
+    datedItems.forEach((item) => {
+      const y = new Date(item.timestamp).getFullYear().toString();
+      if (!isNaN(parseInt(y))) {
+        years.add(y);
+      }
+    });
+    return Array.from(years).sort((a, b) => b.localeCompare(a));
+  }, [datedItems]);
+
+  // Group dated items by Year and Month: { "2026": { "10月": [...] } }
   const groupedTimeline = useMemo(() => {
     const groups: Record<string, Record<string, TimelineItem[]>> = {};
 
-    filteredItems.forEach((item) => {
+    datedItems.forEach((item) => {
       const d = new Date(item.timestamp);
       const year = isNaN(d.getFullYear()) ? 'Unknown' : d.getFullYear().toString();
       const month = isNaN(d.getMonth())
@@ -185,7 +214,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     });
 
     return groups;
-  }, [filteredItems]);
+  }, [datedItems]);
 
   const getItemIcon = (itemType: string, badge?: string | null) => {
     const cls = 'w-3.5 h-3.5';
@@ -266,7 +295,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
             </span>
           </h3>
           <p className="text-xs text-neutral-400">
-            按时间顺序聚合您的数字资产、实体概念变迁与记忆手记
+            按时间顺序聚合您的个人经历、记忆手记与数字资产变迁
           </p>
         </div>
 
@@ -278,6 +307,62 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           >
             撰写新记录
           </button>
+        </div>
+      </div>
+
+      {/* Track Switcher (Dual-Track) */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-neutral-900/90 border border-neutral-800 p-2.5 rounded-xl">
+        <div className="flex items-center space-x-1.5">
+          <button
+            onClick={() => {
+              setTrack('personal');
+              setSelectedType('all');
+            }}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs transition-all ${
+              track === 'personal'
+                ? 'bg-indigo-600 text-white font-medium shadow-sm shadow-indigo-600/30'
+                : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800'
+            }`}
+          >
+            <Compass className="w-3.5 h-3.5" />
+            <span>个人轨迹 (经历 · 手记)</span>
+          </button>
+          <button
+            onClick={() => {
+              setTrack('system');
+              setSelectedType('all');
+            }}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs transition-all ${
+              track === 'system'
+                ? 'bg-neutral-750 text-neutral-100 font-medium border border-neutral-600 shadow-sm'
+                : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>系统与文件活动</span>
+          </button>
+          <button
+            onClick={() => {
+              setTrack('all');
+              setSelectedType('all');
+            }}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs transition-all ${
+              track === 'all'
+                ? 'bg-neutral-800 text-neutral-200 font-medium border border-neutral-700'
+                : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5" />
+            <span>全部轨道</span>
+          </button>
+        </div>
+
+        <div className="text-[11px] text-neutral-400 px-2">
+          {track === 'personal'
+            ? '默认聚焦：您的通关经历、里程碑与个人手记'
+            : track === 'system'
+            ? '辅助轨道：本地文件索引与系统实体变迁'
+            : '全景融合：所有个人与系统事件'}
         </div>
       </div>
 
@@ -306,46 +391,54 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           >
             全部
           </button>
-          <button
-            onClick={() => setSelectedType('asset')}
-            className={`px-2.5 py-1 rounded-md transition-colors ${
-              selectedType === 'asset'
-                ? 'bg-sky-500/20 text-sky-300 font-medium border border-sky-500/30'
-                : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            数字资产
-          </button>
-          <button
-            onClick={() => setSelectedType('entity')}
-            className={`px-2.5 py-1 rounded-md transition-colors ${
-              selectedType === 'entity'
-                ? 'bg-indigo-500/20 text-indigo-300 font-medium border border-indigo-500/30'
-                : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            实体概念
-          </button>
-          <button
-            onClick={() => setSelectedType('memory')}
-            className={`px-2.5 py-1 rounded-md transition-colors ${
-              selectedType === 'memory'
-                ? 'bg-amber-500/20 text-amber-300 font-medium border border-amber-500/30'
-                : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            记忆手记
-          </button>
-          <button
-            onClick={() => setSelectedType('experience')}
-            className={`px-2.5 py-1 rounded-md transition-colors ${
-              selectedType === 'experience'
-                ? 'bg-emerald-500/20 text-emerald-300 font-medium border border-emerald-500/30'
-                : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            个人足迹
-          </button>
+          {(track === 'personal' || track === 'all') && (
+            <>
+              <button
+                onClick={() => setSelectedType('experience')}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  selectedType === 'experience'
+                    ? 'bg-emerald-500/20 text-emerald-300 font-medium border border-emerald-500/30'
+                    : 'text-neutral-400 hover:text-neutral-200'
+                }`}
+              >
+                个人足迹
+              </button>
+              <button
+                onClick={() => setSelectedType('memory')}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  selectedType === 'memory'
+                    ? 'bg-amber-500/20 text-amber-300 font-medium border border-amber-500/30'
+                    : 'text-neutral-400 hover:text-neutral-200'
+                }`}
+              >
+                记忆手记
+              </button>
+            </>
+          )}
+          {(track === 'system' || track === 'all') && (
+            <>
+              <button
+                onClick={() => setSelectedType('asset')}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  selectedType === 'asset'
+                    ? 'bg-sky-500/20 text-sky-300 font-medium border border-sky-500/30'
+                    : 'text-neutral-400 hover:text-neutral-200'
+                }`}
+              >
+                数字资产
+              </button>
+              <button
+                onClick={() => setSelectedType('entity')}
+                className={`px-2.5 py-1 rounded-md transition-colors ${
+                  selectedType === 'entity'
+                    ? 'bg-indigo-500/20 text-indigo-300 font-medium border border-indigo-500/30'
+                    : 'text-neutral-400 hover:text-neutral-200'
+                }`}
+              >
+                实体概念
+              </button>
+            </>
+          )}
 
           {/* Year selector */}
           {availableYears.length > 0 && (
@@ -365,6 +458,68 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         </div>
       </div>
 
+      {/* Undated Items Drawer / Section */}
+      {undatedItems.length > 0 && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <Clock className="w-4 h-4 text-amber-400" />
+              <h4 className="text-xs font-semibold text-amber-300">
+                岁月回忆 · 时间待定 ({undatedItems.length})
+              </h4>
+              <span className="text-[10px] text-amber-400/80 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                独立呈现 · 不混入确切日期流
+              </span>
+            </div>
+            <button
+              onClick={() => setUndatedExpanded(!undatedExpanded)}
+              className="flex items-center space-x-1 text-xs text-amber-400/90 hover:text-amber-300 transition-colors"
+            >
+              <span>{undatedExpanded ? '收起' : '展开'}</span>
+              {undatedExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
+          </div>
+          {undatedExpanded && (
+            <div className="space-y-2 pt-1">
+              <p className="text-[11px] text-neutral-400">
+                以下经历未记录确切发生年份或日期，系统独立在此呈现，避免伪装为录入当天或默认时间。点击卡片可查看详情或补充确切发生时间。
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                {undatedItems.map((item) => (
+                  <div
+                    key={`undated-${item.item_type}-${item.id}`}
+                    onClick={() => setActiveItem(item)}
+                    className="p-3 rounded-lg bg-neutral-900/90 border border-neutral-800 hover:border-amber-500/40 hover:bg-neutral-850 cursor-pointer transition-all flex items-start justify-between gap-2 shadow-sm"
+                  >
+                    <div className="flex items-start space-x-2.5 overflow-hidden">
+                      <div className="p-1.5 rounded bg-neutral-800 border border-neutral-700/60 shrink-0 mt-0.5">
+                        {getItemIcon(item.item_type, item.badge)}
+                      </div>
+                      <div className="overflow-hidden">
+                        <div className="flex items-center space-x-1.5">
+                          <span className="text-xs font-medium text-neutral-200 truncate">
+                            {item.title}
+                          </span>
+                          {getItemTypeBadge(item)}
+                        </div>
+                        {item.description && (
+                          <p className="text-[11px] text-neutral-400 mt-0.5 line-clamp-1">
+                            {item.description}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400 shrink-0 font-mono">
+                      待定
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Main Timeline Stream */}
       {loading ? (
         <div className="p-12 text-center text-xs text-neutral-500">正在编织时光轴...</div>
@@ -373,7 +528,13 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           <Calendar className="w-10 h-10 text-neutral-600 mx-auto" />
           <h4 className="text-sm font-medium text-neutral-300">暂无时光轴事件</h4>
           <p className="text-xs text-neutral-500 max-w-sm mx-auto">
-            当您扫描索引本地文件、创建实体概念或记录记忆手记时，它们都会自动呈现在此时光轴上。
+            当您记录个人通关经历、记录记忆手记或扫描数字资产时，它们都会呈现在此时光轴上。
+          </p>
+        </div>
+      ) : datedItems.length === 0 ? (
+        <div className="p-8 rounded-xl bg-neutral-900/60 border border-neutral-800 text-center space-y-2">
+          <p className="text-xs text-neutral-400">
+            当前筛选下的事件均为时间待定事件，已在上方“岁月回忆 · 时间待定”卡片中呈现。
           </p>
         </div>
       ) : (

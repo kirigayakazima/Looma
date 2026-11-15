@@ -1592,12 +1592,26 @@ impl CollectionService for LoomaDb {
 impl TimelineService for LoomaDb {
     fn query_timeline(&self, filter: &TimelineFilter) -> LoomaResult<Vec<TimelineItem>> {
         let conn = self.conn.lock();
-        let types = filter.item_types.as_deref().unwrap_or(&[]);
-        let include_all = types.is_empty() || types.iter().any(|t| t == "all");
+        let track = filter.track.as_deref().unwrap_or("personal");
+        let (include_asset, include_entity, include_memory, include_experience) = if let Some(types) = &filter.item_types {
+            let all = types.is_empty() || types.iter().any(|t| t == "all");
+            (
+                all || types.iter().any(|t| t == "asset"),
+                all || types.iter().any(|t| t == "entity"),
+                all || types.iter().any(|t| t == "memory"),
+                all || types.iter().any(|t| t == "experience"),
+            )
+        } else {
+            match track {
+                "personal" => (false, false, true, true),
+                "system" => (true, true, false, false),
+                _ => (true, true, true, true), // "all"
+            }
+        };
 
         let mut items = Vec::new();
 
-        if include_all || types.iter().any(|t| t == "asset") {
+        if include_asset {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, 'asset', modified_at, COALESCE(path, id), mime_type, kind, metadata_json
@@ -1633,11 +1647,13 @@ impl TimelineService for LoomaDb {
                     description: desc,
                     badge,
                     metadata,
+                    track: Some("system".to_string()),
+                    occurred_precision: None,
                 });
             }
         }
 
-        if include_all || types.iter().any(|t| t == "entity") {
+        if include_entity {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, 'entity', created_at, title, description, entity_type, properties_json
@@ -1673,11 +1689,13 @@ impl TimelineService for LoomaDb {
                     description: desc,
                     badge,
                     metadata,
+                    track: Some("system".to_string()),
+                    occurred_precision: None,
                 });
             }
         }
 
-        if include_all || types.iter().any(|t| t == "memory") {
+        if include_memory {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, 'memory', recorded_at, title, content, category, metadata_json
@@ -1713,11 +1731,13 @@ impl TimelineService for LoomaDb {
                     description: desc,
                     badge,
                     metadata,
+                    track: Some("personal".to_string()),
+                    occurred_precision: Some("instant".to_string()),
                 });
             }
         }
 
-        if include_all || types.iter().any(|t| t == "experience") {
+        if include_experience {
             let mut stmt = conn
                 .prepare(
                     "SELECT e.id, 'experience', e.created_at, e.occurred_value, e.occurred_precision, e.event_type, e.title, ent.title, e.note, e.context_json, e.subject_id
@@ -1838,6 +1858,8 @@ impl TimelineService for LoomaDb {
                     description: note,
                     badge,
                     metadata,
+                    track: Some("personal".to_string()),
+                    occurred_precision: Some(precision),
                 });
             }
         }

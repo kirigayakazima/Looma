@@ -17,6 +17,8 @@ export const zhCN = {
     title: '标题',
   },
   nav: {
+    coreSection: '核心档案',
+    systemSection: '系统与资产',
     home: '概览',
     works: '作品档案',
     games: '个人游戏库',

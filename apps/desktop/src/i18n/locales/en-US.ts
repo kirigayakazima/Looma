@@ -19,6 +19,8 @@ export const enUS: TranslationType = {
     title: 'Title',
   },
   nav: {
+    coreSection: 'Core Archives',
+    systemSection: 'System & Assets',
     home: 'Overview',
     works: 'Works & Media',
     games: 'Game Library',

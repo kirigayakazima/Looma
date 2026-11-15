@@ -145,10 +145,13 @@ export interface TimelineItem {
   description: string | null;
   badge: string | null;
   metadata: Record<string, unknown>;
+  track?: 'personal' | 'system';
+  occurred_precision?: string;
 }
 
 export interface TimelineFilter {
   item_types?: string[];
+  track?: 'personal' | 'system' | 'all';
   limit?: number;
   offset?: number;
 }

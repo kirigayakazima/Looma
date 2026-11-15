@@ -25,18 +25,39 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onSelectTab, vaultName }) => {
   const { t } = useI18n();
 
-  const navItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
+  const coreNavItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'home', label: t.nav.home, icon: <LayoutDashboard className="w-4 h-4" /> },
     { id: 'works', label: t.nav.works, icon: <Film className="w-4 h-4 text-indigo-400" /> },
     { id: 'games', label: t.nav.games, icon: <Gamepad2 className="w-4 h-4 text-emerald-400" /> },
+    { id: 'timeline', label: t.nav.timeline, icon: <Clock className="w-4 h-4" /> },
+    { id: 'memories', label: t.nav.memories, icon: <BookOpen className="w-4 h-4" /> },
+  ];
+
+  const systemNavItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
     { id: 'assets', label: t.nav.assets, icon: <FolderArchive className="w-4 h-4" /> },
     { id: 'entities', label: t.nav.entities, icon: <Boxes className="w-4 h-4" /> },
     { id: 'collections', label: t.nav.collections, icon: <BookmarkCheck className="w-4 h-4" /> },
-    { id: 'timeline', label: t.nav.timeline, icon: <Clock className="w-4 h-4" /> },
-    { id: 'memories', label: t.nav.memories, icon: <BookOpen className="w-4 h-4" /> },
     { id: 'insights', label: t.nav.insights, icon: <Sparkles className="w-4 h-4 text-amber-500" /> },
     { id: 'settings', label: t.nav.settings, icon: <Settings className="w-4 h-4" /> },
   ];
+
+  const renderNavItem = (item: { id: NavTab; label: string; icon: React.ReactNode }) => {
+    const active = currentTab === item.id;
+    return (
+      <button
+        key={item.id}
+        onClick={() => onSelectTab(item.id)}
+        className={`w-full flex items-center space-x-3 px-3 py-2 rounded-md text-sm transition-colors ${
+          active
+            ? 'bg-neutral-800 text-white font-medium shadow-sm'
+            : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50'
+        }`}
+      >
+        <span className={active ? 'text-indigo-400' : 'text-neutral-400'}>{item.icon}</span>
+        <span>{item.label}</span>
+      </button>
+    );
+  };
 
   return (
     <aside className="w-64 bg-neutral-900 border-r border-neutral-800 flex flex-col justify-between h-screen select-none">
@@ -53,24 +74,24 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onSelectTab, vault
         </div>
 
         {/* Navigation list */}
-        <nav className="p-3 space-y-1">
-          {navItems.map((item) => {
-            const active = currentTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => onSelectTab(item.id)}
-                className={`w-full flex items-center space-x-3 px-3 py-2 rounded-md text-sm transition-colors ${
-                  active
-                    ? 'bg-neutral-800 text-white font-medium shadow-sm'
-                    : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50'
-                }`}
-              >
-                <span className={active ? 'text-indigo-400' : 'text-neutral-400'}>{item.icon}</span>
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+        <nav className="p-3 space-y-4">
+          <div>
+            <div className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
+              {t.nav.coreSection}
+            </div>
+            <div className="space-y-0.5">
+              {coreNavItems.map(renderNavItem)}
+            </div>
+          </div>
+
+          <div>
+            <div className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
+              {t.nav.systemSection}
+            </div>
+            <div className="space-y-0.5">
+              {systemNavItems.map(renderNavItem)}
+            </div>
+          </div>
         </nav>
       </div>
 

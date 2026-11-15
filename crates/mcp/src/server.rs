@@ -909,9 +909,11 @@ impl McpServer {
             "get_timeline" => {
                 let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
                 let item_type = args.get("item_type").and_then(|v| v.as_str()).map(|s| vec![s.to_string()]);
+                let track = args.get("track").and_then(|v| v.as_str()).map(|s| s.to_string());
 
                 let filter = TimelineFilter {
                     item_types: item_type,
+                    track,
                     limit,
                     offset: None,
                 };

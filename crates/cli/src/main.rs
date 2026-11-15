@@ -401,8 +401,10 @@ enum RefCommands {
 
 #[derive(Args)]
 struct TimelineArgs {
-    #[arg(short, long, help = "Filter by type: asset | entity | memory")]
+    #[arg(short, long, help = "Filter by type: asset | entity | memory | experience")]
     item_type: Option<String>,
+    #[arg(short, long, help = "Timeline track: personal (default) | system | all")]
+    track: Option<String>,
     #[arg(short, long, default_value_t = 30, help = "Max items to display")]
     limit: usize,
 }
@@ -1018,6 +1020,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Timeline(args) => {
             let filter = TimelineFilter {
                 item_types: args.item_type.map(|t| vec![t]),
+                track: args.track,
                 limit: Some(args.limit),
                 offset: None,
             };
