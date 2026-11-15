@@ -24,12 +24,13 @@ export const AiStatusBadge: React.FC<AiStatusBadgeProps> = ({
       });
       setStatus(res);
       if (onStatusChange) onStatusChange(res);
-    } catch {
+    } catch (err: any) {
+      console.warn('[AiStatusBadge] check_ai_service_status failed:', err);
       const fallback: AiServiceStatus = {
         online: false,
-        endpoint: 'http://localhost:8081/v1',
+        endpoint: 'http://127.0.0.1:8081/v1',
         model: 'gemini-flash-lite',
-        message: 'IPC call failed',
+        message: err?.message || 'IPC call failed',
       };
       setStatus(fallback);
       if (onStatusChange) onStatusChange(fallback);
@@ -55,7 +56,7 @@ export const AiStatusBadge: React.FC<AiStatusBadgeProps> = ({
       title={
         isOnline
           ? `AI 反代服务在线\n端点: ${status?.endpoint}\n模型: ${status?.model}\n延迟: ${status?.latency_ms ?? 0}ms\n点击刷新状态`
-          : 'AI 反代服务未连接 (端口 8081)\n点击重新检测'
+          : `AI 反代服务未连接 (端口 8081)\n端点: ${status?.endpoint || 'http://127.0.0.1:8081/v1'}\n信息: ${status?.message || '无法连接'}\n点击重新检测`
       }
     >
       <span className="relative flex h-2 w-2">

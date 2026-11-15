@@ -933,7 +933,12 @@ impl LoomaCore {
         endpoint: Option<&str>,
         api_key: Option<&str>,
     ) -> AiServiceStatus {
-        let ep = endpoint.unwrap_or("http://localhost:8081/v1").trim_end_matches('/');
+        let raw_ep = endpoint.unwrap_or("http://127.0.0.1:8081/v1").trim_end_matches('/');
+        let ep = if raw_ep.contains("localhost") {
+            raw_ep.replace("localhost", "127.0.0.1")
+        } else {
+            raw_ep.to_string()
+        };
         let key = api_key.unwrap_or("sk-gemini");
         let model = "gemini-flash-lite";
 
@@ -941,7 +946,7 @@ impl LoomaCore {
         let models_url = format!("{ep}/models");
 
         match ureq::get(&models_url)
-            .timeout(std::time::Duration::from_millis(1500))
+            .timeout(std::time::Duration::from_millis(3500))
             .set("Authorization", &format!("Bearer {key}"))
             .call()
         {
@@ -950,7 +955,7 @@ impl LoomaCore {
                     let latency = start.elapsed().as_millis() as u64;
                     AiServiceStatus {
                         online: true,
-                        endpoint: ep.to_string(),
+                        endpoint: ep,
                         model: model.to_string(),
                         latency_ms: Some(latency),
                         message: Some("Local AI reverse proxy connected".to_string()),
@@ -958,7 +963,7 @@ impl LoomaCore {
                 } else {
                     AiServiceStatus {
                         online: false,
-                        endpoint: ep.to_string(),
+                        endpoint: ep,
                         model: model.to_string(),
                         latency_ms: None,
                         message: Some(format!("HTTP error {}", resp.status())),
@@ -967,7 +972,7 @@ impl LoomaCore {
             }
             Err(e) => AiServiceStatus {
                 online: false,
-                endpoint: ep.to_string(),
+                endpoint: ep,
                 model: model.to_string(),
                 latency_ms: None,
                 message: Some(format!("Unreachable: {e}")),
@@ -983,7 +988,12 @@ impl LoomaCore {
         api_key: Option<&str>,
         model: Option<&str>,
     ) -> LoomaResult<AiGameAnalysis> {
-        let ep = endpoint.unwrap_or("http://localhost:8081/v1").trim_end_matches('/');
+        let raw_ep = endpoint.unwrap_or("http://127.0.0.1:8081/v1").trim_end_matches('/');
+        let ep = if raw_ep.contains("localhost") {
+            raw_ep.replace("localhost", "127.0.0.1")
+        } else {
+            raw_ep.to_string()
+        };
         let key = api_key.unwrap_or("sk-gemini");
         let chosen_model = model.unwrap_or("gemini-flash-lite");
 

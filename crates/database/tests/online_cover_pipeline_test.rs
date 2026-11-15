@@ -117,7 +117,7 @@ fn test_ai_service_status_and_game_analysis() {
     let db = LoomaDb::in_memory().expect("in-memory db failed");
     let core = LoomaCore::new(Arc::new(db));
 
-    // Test health check against local endpoint
+    // Test health check against local endpoint (defaults to 127.0.0.1:8081)
     let status = core.check_ai_service_status(None, None);
     if status.online {
         assert!(status.latency_ms.is_some());
