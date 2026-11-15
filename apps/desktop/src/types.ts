@@ -55,6 +55,19 @@ export interface AssetFilter {
   offset?: number;
 }
 
+export interface ThumbnailResult {
+  asset_id: string;
+  cache_path: string;
+  data_url: string;
+  is_newly_generated: boolean;
+}
+
+export interface ThumbnailCacheStats {
+  file_count: number;
+  total_bytes: number;
+  cache_dir: string;
+}
+
 export interface ScanProgress {
   total_discovered: number;
   new_assets: number;

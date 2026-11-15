@@ -24,3 +24,4 @@ looma-mcp.workspace = true
 looma-scanner = { path = "../scanner" }
 looma-intelligence.workspace = true
 tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }

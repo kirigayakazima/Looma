@@ -27,8 +27,61 @@ import {
   Tag,
   Plus,
 } from 'lucide-react';
-import { Entity, Asset, ScanProgress, ScanSummary, Relation } from '../types';
+import { Entity, Asset, ScanProgress, ScanSummary, Relation, ThumbnailResult } from '../types';
 import { useI18n } from '../i18n';
+
+const AssetThumbnail: React.FC<{ asset: Asset }> = ({ asset }) => {
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    if (asset.kind === 'image' && asset.path) {
+      setLoading(true);
+      invoke<ThumbnailResult | null>('get_asset_thumbnail', {
+        assetId: asset.id,
+        maxDimension: 320,
+      })
+        .then((res) => {
+          if (active && res?.data_url) {
+            setThumbUrl(res.data_url);
+          }
+        })
+        .catch((e) => {
+          console.debug('Failed to get thumbnail for asset:', asset.id, e);
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [asset.id, asset.kind, asset.path]);
+
+  if (asset.kind === 'image' && thumbUrl) {
+    return (
+      <div className="w-full h-32 mb-2 rounded-lg overflow-hidden bg-neutral-950 border border-neutral-800 flex items-center justify-center">
+        <img
+          src={thumbUrl}
+          alt={asset.path || asset.id}
+          className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-105"
+          loading="lazy"
+        />
+      </div>
+    );
+  }
+
+  if (asset.kind === 'image' && loading) {
+    return (
+      <div className="w-full h-32 mb-2 rounded-lg bg-neutral-950/60 border border-neutral-850 flex items-center justify-center">
+        <Loader2 className="w-5 h-5 text-neutral-600 animate-spin" />
+      </div>
+    );
+  }
+
+  return null;
+};
 
 interface AssetsViewProps {
   assets: Asset[];
@@ -91,8 +144,18 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, entities, onRefr
     if (activeAsset && activeAsset.kind === 'image' && activeAsset.path) {
       setLoadingPreview(true);
       setAssetPreview(null);
-      safeInvoke<string>('read_asset_preview', { path: activeAsset.path }).then((preview) => {
-        setAssetPreview(preview);
+      safeInvoke<ThumbnailResult>('get_asset_thumbnail', {
+        assetId: activeAsset.id,
+        maxDimension: 1280,
+      }).then((res) => {
+        if (res?.data_url) {
+          setAssetPreview(res.data_url);
+        } else {
+          safeInvoke<string>('read_asset_preview', { path: activeAsset.path }).then((preview) => {
+            setAssetPreview(preview);
+          });
+        }
+      }).finally(() => {
         setLoadingPreview(false);
       });
     } else {
@@ -430,6 +493,9 @@ export const AssetsView: React.FC<AssetsViewProps> = ({ assets, entities, onRefr
                 }`}
               >
                 <div>
+                  {asset.kind === 'image' && (
+                    <AssetThumbnail asset={asset} />
+                  )}
                   <div className="flex items-start justify-between gap-2 mb-2">
                     <div className="p-2 rounded-lg bg-neutral-950 border border-neutral-800/80 group-hover:border-neutral-700 transition-colors">
                       {getKindIcon(asset.kind, 'w-5 h-5')}

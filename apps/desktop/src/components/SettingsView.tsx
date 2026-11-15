@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { VaultInfo, BackupResult, RestoreResult, VaultDoctorReport } from '../types';
+import React, { useState, useEffect } from 'react';
+import { VaultInfo, BackupResult, RestoreResult, VaultDoctorReport, ThumbnailCacheStats } from '../types';
 import {
   ShieldCheck,
   HardDrive,
@@ -17,6 +17,9 @@ import {
   Sun,
   Moon,
   Monitor,
+  Image as ImageIcon,
+  RefreshCw,
+  Trash2,
 } from 'lucide-react';
 import { useI18n, Locale } from '../i18n';
 import { useTheme, Theme } from '../theme';
@@ -44,12 +47,35 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo, onRefresh
   const [isCleaning, setIsCleaning] = useState(false);
   const [cleanMessage, setCleanMessage] = useState<string | null>(null);
 
+  // Thumbnail Cache states
+  const [cacheStats, setCacheStats] = useState<ThumbnailCacheStats | null>(null);
+  const [clearingCache, setClearingCache] = useState(false);
+
   const safeInvoke = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T | null> => {
     try {
       return await invoke<T>(cmd, args);
     } catch (err) {
       console.warn(`[Tauri IPC] '${cmd}' failed:`, err);
       return null;
+    }
+  };
+
+  const loadCacheStats = async () => {
+    const stats = await safeInvoke<ThumbnailCacheStats>('get_thumbnail_cache_stats');
+    if (stats) setCacheStats(stats);
+  };
+
+  useEffect(() => {
+    loadCacheStats();
+  }, []);
+
+  const handleClearCache = async () => {
+    setClearingCache(true);
+    try {
+      await safeInvoke('clear_thumbnail_cache');
+      await loadCacheStats();
+    } finally {
+      setClearingCache(false);
     }
   };
 
@@ -430,6 +456,60 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ vaultInfo, onRefresh
               </span>
             </div>
           </div>
+        </div>
+
+        {/* Thumbnail Cache Management (PR 2 Usability) */}
+        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2 text-sm font-medium text-neutral-200">
+              <ImageIcon className="w-4 h-4 text-emerald-400" />
+              <span>本地缩略图缓存 (Thumbnail Cache)</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={loadCacheStats}
+                className="p-1 rounded hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors"
+                title="刷新缓存统计"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={handleClearCache}
+                disabled={clearingCache || !cacheStats || cacheStats.file_count === 0}
+                className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-medium flex items-center space-x-1 transition-colors disabled:opacity-40"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>{clearingCache ? '清空中...' : '清空缓存'}</span>
+              </button>
+            </div>
+          </div>
+
+          <p className="text-xs text-neutral-400 leading-relaxed">
+            图片资产采用按需异步生成的 WebP 缩略图缓存，绝不修改原始参考图片。可随时清空重建，不影响数据库索引。
+          </p>
+
+          <div className="grid grid-cols-2 gap-3 text-xs pt-1">
+            <div className="p-3 rounded bg-neutral-850 border border-neutral-800">
+              <div className="text-neutral-500 mb-1">缓存文件数量</div>
+              <div className="text-neutral-200 font-medium font-mono">
+                {cacheStats ? `${cacheStats.file_count} 张缓存图片` : '加载中...'}
+              </div>
+            </div>
+            <div className="p-3 rounded bg-neutral-850 border border-neutral-800">
+              <div className="text-neutral-500 mb-1">缓存占用空间</div>
+              <div className="text-neutral-200 font-medium font-mono">
+                {cacheStats
+                  ? `${(cacheStats.total_bytes / (1024 * 1024)).toFixed(2)} MB`
+                  : '加载中...'}
+              </div>
+            </div>
+          </div>
+
+          {cacheStats?.cache_dir && (
+            <div className="text-[11px] text-neutral-500 font-mono truncate">
+              缓存路径: {cacheStats.cache_dir}
+            </div>
+          )}
         </div>
 
         {/* Database & Architecture */}

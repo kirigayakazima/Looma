@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
+use base64::Engine;
 
 use crate::error::{LoomaError, LoomaResult};
 use crate::events::{DomainEvent, EventBus, EventEnvelope};
@@ -2607,6 +2608,154 @@ impl LoomaCore {
 
     pub fn add_suppression(&self, root_id: &str, relative_path: &str, reason: Option<&str>) -> LoomaResult<()> {
         self.repo.add_suppression(root_id, relative_path, reason)
+    }
+
+    /// Retrieve or generate an on-demand, bounded WebP thumbnail for an image asset.
+    /// Results are persisted in `.looma/cache/thumbnails/<asset_id>_w<max_dimension>.webp`.
+    /// The generated thumbnail is written atomically via a tempfile to prevent corrupt cache on cancellation.
+    pub fn get_asset_thumbnail(
+        &self,
+        asset_id: &str,
+        max_dimension: u32,
+    ) -> LoomaResult<Option<ThumbnailResult>> {
+        let asset = match self.get_asset(asset_id)? {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        if asset.kind != AssetKind::Image {
+            return Ok(None);
+        }
+
+        let source_path_str = match &asset.path {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let source_path = std::path::Path::new(source_path_str);
+        if !source_path.exists() {
+            return Ok(None);
+        }
+
+        let vault_info = self.get_vault_info()?;
+        let cache_dir = if vault_info.vault_path.as_os_str() == ":memory:" {
+            std::env::temp_dir().join("looma_test_cache").join("thumbnails")
+        } else {
+            vault_info.vault_path.join(".looma").join("cache").join("thumbnails")
+        };
+        std::fs::create_dir_all(&cache_dir)?;
+
+        let cache_file_name = format!("{}_w{}.webp", asset.id, max_dimension);
+        let cache_path = cache_dir.join(cache_file_name);
+
+        let mut needs_generation = true;
+        if cache_path.exists() {
+            if let (Ok(meta_src), Ok(meta_cache)) = (source_path.metadata(), cache_path.metadata()) {
+                if let (Ok(mtime_src), Ok(mtime_cache)) = (meta_src.modified(), meta_cache.modified()) {
+                    if mtime_cache >= mtime_src && meta_cache.len() > 0 {
+                        needs_generation = false;
+                    }
+                }
+            }
+        }
+
+        let is_newly_generated = needs_generation;
+        if needs_generation {
+            let reader = image::ImageReader::open(source_path)
+                .map_err(|e| LoomaError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to open image {}: {}", source_path.display(), e))))?
+                .with_guessed_format()
+                .map_err(|e| LoomaError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to guess format: {}", e))))?;
+
+            let img = reader.decode()
+                .map_err(|e| LoomaError::Validation(format!("Failed to decode image: {}", e)))?;
+
+            let thumb = img.thumbnail(max_dimension, max_dimension);
+
+            let tmp_path = cache_dir.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+            thumb.save_with_format(&tmp_path, image::ImageFormat::WebP)
+                .map_err(|e| LoomaError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to encode/save webp thumbnail: {}", e))))?;
+
+            let _ = std::fs::remove_file(&cache_path);
+            std::fs::rename(&tmp_path, &cache_path)
+                .map_err(|e| LoomaError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to finalize thumbnail file: {}", e))))?;
+        }
+
+        let thumb_bytes = std::fs::read(&cache_path)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&thumb_bytes);
+        let data_url = format!("data:image/webp;base64,{}", b64);
+
+        Ok(Some(ThumbnailResult {
+            asset_id: asset_id.to_string(),
+            cache_path: cache_path.to_string_lossy().to_string(),
+            data_url,
+            is_newly_generated,
+        }))
+    }
+
+    /// Return statistics on thumbnail cache usage (file count, total size, directory).
+    pub fn get_thumbnail_cache_stats(&self) -> LoomaResult<ThumbnailCacheStats> {
+        let vault_info = self.get_vault_info()?;
+        let cache_dir = if vault_info.vault_path.as_os_str() == ":memory:" {
+            std::env::temp_dir().join("looma_test_cache").join("thumbnails")
+        } else {
+            vault_info.vault_path.join(".looma").join("cache").join("thumbnails")
+        };
+
+        if !cache_dir.exists() {
+            return Ok(ThumbnailCacheStats {
+                file_count: 0,
+                total_bytes: 0,
+                cache_dir: cache_dir.to_string_lossy().to_string(),
+            });
+        }
+
+        let mut file_count = 0;
+        let mut total_bytes = 0;
+        if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        file_count += 1;
+                        total_bytes += meta.len();
+                    }
+                }
+            }
+        }
+
+        Ok(ThumbnailCacheStats {
+            file_count,
+            total_bytes,
+            cache_dir: cache_dir.to_string_lossy().to_string(),
+        })
+    }
+
+    /// Clear all cached thumbnail files and return count of removed files.
+    pub fn clear_thumbnail_cache(&self) -> LoomaResult<usize> {
+        let vault_info = self.get_vault_info()?;
+        let cache_dir = if vault_info.vault_path.as_os_str() == ":memory:" {
+            std::env::temp_dir().join("looma_test_cache").join("thumbnails")
+        } else {
+            vault_info.vault_path.join(".looma").join("cache").join("thumbnails")
+        };
+
+        if !cache_dir.exists() {
+            return Ok(0);
+        }
+
+        let mut removed = 0;
+        if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        if std::fs::remove_file(entry.path()).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
     }
 }
 

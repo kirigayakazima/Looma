@@ -74,3 +74,18 @@ pub struct AssetFilter {
     pub offset: Option<usize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThumbnailResult {
+    pub asset_id: String,
+    pub cache_path: String,
+    pub data_url: String,
+    pub is_newly_generated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThumbnailCacheStats {
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub cache_dir: String,
+}
+

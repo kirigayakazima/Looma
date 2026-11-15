@@ -675,6 +675,32 @@ fn detect_game_candidates(
     Ok(candidates)
 }
 
+#[tauri::command]
+fn get_asset_thumbnail(
+    asset_id: String,
+    max_dimension: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Option<ThumbnailResult>, String> {
+    state.core.get_asset_thumbnail(&asset_id, max_dimension.unwrap_or(320))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_thumbnail_cache_stats(
+    state: State<'_, AppState>,
+) -> Result<ThumbnailCacheStats, String> {
+    state.core.get_thumbnail_cache_stats()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clear_thumbnail_cache(
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    state.core.clear_thumbnail_cache()
+        .map_err(|e| e.to_string())
+}
+
 fn resolve_default_vault_path() -> PathBuf {
     if let Some(proj_dirs) = ProjectDirs::from("com", "looma", "Looma") {
         let data_dir = proj_dirs.data_dir();
@@ -763,7 +789,10 @@ pub fn run() {
             record_experience,
             complete_work_and_record_experience,
             list_experiences_for_work,
-            archive_experience
+            archive_experience,
+            get_asset_thumbnail,
+            get_thumbnail_cache_stats,
+            clear_thumbnail_cache
         ])
         .run(tauri::generate_context!())
     {
